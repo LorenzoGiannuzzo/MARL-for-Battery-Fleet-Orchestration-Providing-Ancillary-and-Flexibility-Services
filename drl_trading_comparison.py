@@ -16,6 +16,7 @@ FINAL VERSION:
 - SOH comparison plots added
 ------------------------------------------------------------------------------------------------------------------------
 """
+
 import pandas as pd
 import numpy as np
 from datetime import datetime
