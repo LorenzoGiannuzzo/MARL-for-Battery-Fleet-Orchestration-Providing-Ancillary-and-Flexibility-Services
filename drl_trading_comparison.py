@@ -30,7 +30,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 import traceback
 
-# Lorenzo Giannuzzo: ===pip install stable-baselines3[extra]================= CONFIGURATION ====================
+# Lorenzo Giannuzzo: =================== CONFIGURATION ====================
 TEST_FIRST_MONTH_ONLY = False
 NOISE_TYPES_TO_TEST = ['uniform', 'normal', 'ornstein-uhlenbeck']
 FORCE_RETRAIN = False
