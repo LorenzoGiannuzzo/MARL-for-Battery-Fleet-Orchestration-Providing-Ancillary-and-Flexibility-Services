@@ -19,17 +19,18 @@ FINAL VERSION:
 
 import pandas as pd
 import numpy as np
-from datetime import datetime
 import os
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import gymnasium as gym
-from gymnasium import spaces
-from collections import deque
 import torch
+import traceback
+
+from datetime import datetime
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
-import traceback
+from gymnasium import spaces
+from collections import deque
 
 # Lorenzo Giannuzzo: =================== CONFIGURATION ====================
 TEST_FIRST_MONTH_ONLY = False
