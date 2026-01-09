@@ -79,7 +79,7 @@ class MILPOptimizer:
         
         Args:
             battery_params: Battery system parameters
-            flexibility_market: Flexibility market model
+            flexibility_market: Flexibility market model (should be deterministic)
         """
         self.battery_params = battery_params
         self.flexibility_market = flexibility_market

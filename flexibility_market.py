@@ -58,8 +58,13 @@ class FlexibilityMarket:
     Manages FCR, aFRR, and mFRR services with realistic pricing and constraints
     """
     
-    def __init__(self):
+    def __init__(self, random_seed: Optional[int] = None):
         """Initialize with ARERA-compliant default parameters"""
+        # Set random seed for deterministic behavior
+        self.random_seed = random_seed
+        if random_seed is not None:
+            np.random.seed(random_seed)
+        
         # ARERA tariff structure (EUR/MW/h for capacity, EUR/MWh for energy)
         self.arera_tariffs = {
             ServiceType.FCR: {
@@ -136,8 +141,10 @@ class FlexibilityMarket:
         if is_weekend:
             multiplier *= self.price_multipliers['weekend_multiplier']
         
-        # Add random variation (±10%) to simulate market conditions
-        price_variation = np.random.uniform(0.9, 1.1)
+        # Add deterministic variation based on hour and day to simulate market conditions
+        # This replaces the random variation to ensure reproducibility
+        variation_seed = (hour * 7 + day_of_week) % 100
+        price_variation = 0.9 + (variation_seed / 100.0) * 0.2  # Maps to [0.9, 1.1]
         final_multiplier = multiplier * price_variation
         
         # Create service opportunities for each type
