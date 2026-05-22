@@ -22,7 +22,13 @@ class BatteryParameters:
     soc_min: float = 0.1          # Minimum SOC (10%)
     soc_max: float = 0.9          # Maximum SOC (90%)
     initial_soc: float = 0.5      # Initial SOC (50%)
-    degradation_cost_per_mwh: float = 25000.0  # EUR/MWh degradation cost (matches PPO system)
+    degradation_cost_per_mwh: float = 25000.0  # EUR/MWh of replacement capacity cost
+    cycle_life: int = 6000        # Equivalent full cycles to end-of-life (matches PPO env)
+    # BUG FIX: marginal degradation cost = degradation_cost_per_mwh / (2 * cycle_life)
+    # The factor (2 * cycle_life) amortizes the replacement cost over the total energy
+    # throughput in lifetime (each full cycle = 2 * capacity_mwh of throughput).
+    # The original MILP missed this factor and over-penalized degradation by 12000x
+    # relative to the PPO environment in drl_flexibility_analysis.py.
 
 
 @dataclass
@@ -352,8 +358,11 @@ class MILPOptimizer:
                     objective += capacity_revenue + energy_revenue
             
             # ==================== BATTERY DEGRADATION COST ====================
-            # Degradation cost based on total energy throughput
-            # Uses the existing degradation model from the PPO system for consistency
+            # Degradation cost based on total energy throughput.
+            # BUG FIX: amortize replacement cost over (2 * cycle_life) MWh of throughput.
+            # This matches the formula used in drl_flexibility_analysis.py and in the
+            # extended/enhanced PPO environments:
+            #     degradation_cost = MWh * degradation_cost_per_mwh / (2 * cycle_life)
             
             # Total energy throughput for this time step (MWh)
             energy_throughput = variables['P_charge'][t] + variables['P_discharge'][t]
@@ -366,9 +375,10 @@ class MILPOptimizer:
             
             total_throughput = energy_throughput + flexibility_throughput
             
-            # Apply degradation cost per MWh of throughput
-            # This matches the existing PPO system's degradation cost calculation
-            degradation_cost = total_throughput * self.battery_params.degradation_cost_per_mwh
+            # Apply marginal degradation cost per MWh of throughput
+            marginal_cost_per_mwh = (self.battery_params.degradation_cost_per_mwh / 
+                                     (2.0 * self.battery_params.cycle_life))
+            degradation_cost = total_throughput * marginal_cost_per_mwh
             
             objective -= degradation_cost
         
@@ -507,6 +517,7 @@ class MILPOptimizer:
                     flexibility_revenue += capacity_rev + energy_rev
         
         # Calculate degradation cost
+        # BUG FIX: same marginal formula as in the objective function
         total_energy_throughput = 0.0
         for t in range(time_horizon):
             # Arbitrage throughput
@@ -520,7 +531,9 @@ class MILPOptimizer:
             
             total_energy_throughput += arbitrage_throughput + flexibility_throughput
         
-        degradation_cost = total_energy_throughput * self.battery_params.degradation_cost_per_mwh
+        marginal_cost_per_mwh = (self.battery_params.degradation_cost_per_mwh / 
+                                 (2.0 * self.battery_params.cycle_life))
+        degradation_cost = total_energy_throughput * marginal_cost_per_mwh
         
         # Calculate performance metrics
         battery_utilization = total_energy_throughput / (

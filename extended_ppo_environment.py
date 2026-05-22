@@ -514,10 +514,11 @@ class ExtendedBatteryTradingEnv(gym.Env):
         
         # Execute arbitrage action
         arbitrage_energy = self.battery.step(actions['arbitrage'])
-        # Correct arbitrage profit calculation:
-        # - If arbitrage_energy > 0 (discharge/sell): profit = +energy * price
-        # - If arbitrage_energy < 0 (charge/buy): profit = -|energy| * price = +energy * price
-        arbitrage_profit = arbitrage_energy * true_price
+        # BUG FIX: sign convention is enforced by Battery.step():
+        # - arbitrage_energy > 0 -> charging (energy bought from grid), profit is a cost
+        # - arbitrage_energy < 0 -> discharging (energy sold to grid),    profit is a revenue
+        # Matches the convention used in BatteryTradingEnvClean (drl_flexibility_analysis.py)
+        arbitrage_profit = -arbitrage_energy * true_price
         
         # Update flexibility reservations
         self.reserved_fcr = actions['fcr_percentage'] * available_power

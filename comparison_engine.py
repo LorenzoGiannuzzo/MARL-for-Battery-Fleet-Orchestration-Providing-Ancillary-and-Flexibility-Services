@@ -117,12 +117,16 @@ class ComparisonEngine:
     Ensures fairness by using identical datasets, errors, and conditions
     """
     
-    def __init__(self, config: ComparisonConfig):
+    def __init__(self, config: ComparisonConfig, ppo_model_path: Optional[str] = None):
         """
         Initialize comparison engine
         
         Args:
             config: Comparison configuration parameters
+            ppo_model_path: Optional path to a trained stable-baselines3 PPO model.
+                            If provided, the engine will use the trained policy for the
+                            PPO episodes. If None, a greedy price-threshold heuristic
+                            is used as a fallback baseline (NOT a real PPO policy).
         """
         self.config = config
         
@@ -143,6 +147,20 @@ class ComparisonEngine:
         
         # Performance tracking
         self.execution_times: Dict[str, List[float]] = {'PPO': [], 'MILP': []}
+        
+        # BUG FIX: optionally load a trained PPO model so that the engine actually
+        # benchmarks a real PPO policy and not a hand-crafted greedy heuristic.
+        self.ppo_model_path = ppo_model_path
+        self.ppo_model = None
+        if ppo_model_path is not None:
+            try:
+                from stable_baselines3 import PPO
+                self.ppo_model = PPO.load(ppo_model_path)
+                print(f"Loaded trained PPO model from {ppo_model_path}")
+            except Exception as e:
+                print(f"WARNING: failed to load PPO model from {ppo_model_path}: {e}")
+                print("         Falling back to greedy heuristic baseline.")
+                self.ppo_model = None
         
     def _create_battery_parameters(self) -> BatteryParameters:
         """Create standardized battery parameters for both algorithms"""
@@ -258,9 +276,14 @@ class ComparisonEngine:
         flexibility_reservations = {'FCR': [], 'aFRR': [], 'mFRR': []}
         
         for step in range(min(self.config.episode_length, len(forecast_prices))):
-            # Simple greedy action selection (placeholder)
-            # In real implementation, this would use PPO agent.predict(obs)
-            action = self._select_greedy_action(obs, env)
+            # BUG FIX: use the trained PPO model if available, otherwise fall back
+            # to the greedy heuristic baseline. The previous version always used the
+            # heuristic, so the "PPO" results were never actually produced by a PPO.
+            if self.ppo_model is not None:
+                action, _ = self.ppo_model.predict(obs, deterministic=True)
+                action = int(action)
+            else:
+                action = self._select_greedy_action(obs, env)
             
             obs, reward, done, truncated, info = env.step(action)
             
@@ -371,8 +394,18 @@ class ComparisonEngine:
     
     def _select_greedy_action(self, obs: np.ndarray, env: ExtendedBatteryTradingEnv) -> int:
         """
-        Simple greedy action selection for PPO placeholder
-        In real implementation, this would be replaced by trained PPO agent
+        Greedy price-threshold heuristic used ONLY as a fallback baseline when no
+        trained PPO model is supplied. This is NOT a real PPO policy.
+        
+        Action encoding (see ExtendedBatteryTradingEnv.arbitrage_values):
+            arbitrage_values = np.linspace(-BATTERY_POWER, BATTERY_POWER, 21)
+        Therefore:
+            action_idx = 5  -> -1.0 MW (negative action -> Battery.step discharges)
+            action_idx = 15 -> +1.0 MW (positive action -> Battery.step charges)
+        
+        BUG FIX: the previous version had the action indices swapped relative to
+        their comments, so the heuristic was charging at high prices and discharging
+        at low prices (i.e. losing money on every cycle).
         
         Args:
             obs: Current observation
@@ -381,19 +414,20 @@ class ComparisonEngine:
         Returns:
             Selected action index
         """
-        # Extract current price and forecast from observation
-        current_price_norm = obs[25] if len(obs) > 25 else 0.5  # Current price (normalized)
-        current_price = current_price_norm * 200.0  # Denormalize
+        # Extract current price from observation (index 25 is current_price_norm,
+        # normalized by 200.0 EUR/MWh in ExtendedBatteryTradingEnv._get_observation)
+        current_price_norm = obs[25] if len(obs) > 25 else 0.5
+        current_price = current_price_norm * 200.0
         
         # Simple strategy: charge when price is low, discharge when high
         price_threshold = 60.0  # EUR/MWh
         
         if current_price < price_threshold:
-            # Low price: charge (negative power)
-            return 5  # Moderate charging action
+            # Low price -> charge (positive arbitrage power)
+            return 15  # +1.0 MW: moderate charging action
         else:
-            # High price: discharge (positive power)
-            return 15  # Moderate discharging action
+            # High price -> discharge (negative arbitrage power)
+            return 5   # -1.0 MW: moderate discharging action
     
     def run_comparison(self, prices: List[float]) -> ComparisonSummary:
         """

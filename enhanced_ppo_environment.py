@@ -295,7 +295,11 @@ class EnhancedBatteryTradingEnv(gym.Env):
         
         # Execute arbitrage action
         arbitrage_energy = self.battery.step(actions['arbitrage'])
-        arbitrage_profit = arbitrage_energy * true_price
+        # BUG FIX: sign convention is enforced by Battery.step():
+        # - arbitrage_energy > 0 -> charging (energy bought from grid), profit is a cost
+        # - arbitrage_energy < 0 -> discharging (energy sold to grid),    profit is a revenue
+        # Matches the convention used in BatteryTradingEnvClean (drl_flexibility_analysis.py)
+        arbitrage_profit = -arbitrage_energy * true_price
         
         # Update flexibility reservations (no conflicts in enhanced version - simpler)
         available_power = self.battery.max_power
