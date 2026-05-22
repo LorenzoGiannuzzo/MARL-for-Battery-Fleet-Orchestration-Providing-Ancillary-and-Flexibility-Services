@@ -1,0 +1,62 @@
+================================================================================
+PPO vs MILP BATTERY TRADING COMPARISON REPORT
+================================================================================
+
+CONFIGURATION:
+----------------------------------------
+Time Horizon: 24 hours
+Error Distributions: uniform, normal
+Episodes per Distribution: 3
+Battery Capacity: 4.0 MWh
+Battery Max Power: 2.0 MW
+Flexibility Enabled: True
+
+RESULTS SUMMARY:
+----------------------------------------
+Total Episodes: 12
+Successful Episodes: 12
+Failed Episodes: 0
+Success Rate: 100.0%
+
+ALGORITHM PERFORMANCE:
+----------------------------------------
+PPO:
+  Mean Profit: -22.66 EUR
+  Profit Std: 20.89 EUR
+  Min Profit: -42.62 EUR
+  Max Profit: 20.95 EUR
+  Mean Execution Time: 0.0057 seconds
+
+MILP:
+  Mean Profit: 2015.57 EUR
+  Profit Std: 0.00 EUR
+  Min Profit: 2015.57 EUR
+  Max Profit: 2015.57 EUR
+  Mean Execution Time: 0.1297 seconds
+
+PROFIT ADVANTAGE BY DISTRIBUTION:
+----------------------------------------
+uniform: 2049.03 EUR (advantage to MILP)
+normal: 2027.43 EUR (advantage to MILP)
+
+EXECUTION TIME RATIOS (MILP/PPO):
+----------------------------------------
+uniform: 30.70x
+normal: 18.18x
+
+STATISTICAL SIGNIFICANCE TESTS:
+----------------------------------------
+profit_ttest: p=0.0000 (Significant)
+profit_mannwhitney: p=0.0028 (Significant)
+
+GENERATED VISUALIZATIONS:
+----------------------------------------
+profit_comparison: results\profit_comparison_analysis.png
+soc_utilization: results\soc_utilization_analysis.png
+flexibility_heatmaps: results\flexibility_usage_heatmaps.png
+statistical_summary: results\statistical_analysis_summary.png
+interactive_dashboard: results\interactive_dashboard.html
+
+================================================================================
+Report generated at: 2026-01-08T11:57:05.744212
+================================================================================

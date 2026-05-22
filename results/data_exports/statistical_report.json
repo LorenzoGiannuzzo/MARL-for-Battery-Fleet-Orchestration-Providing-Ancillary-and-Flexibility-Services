@@ -1,0 +1,246 @@
+{
+  "analysis_timestamp": "2026-01-08T11:57:20.031927",
+  "total_episodes": 12,
+  "algorithms_compared": [
+    "PPO",
+    "MILP"
+  ],
+  "error_distributions": [
+    "uniform",
+    "normal"
+  ],
+  "profit_comparison": {
+    "ppo_stats": {
+      "mean": -22.6619559324307,
+      "median": -28.8845186209711,
+      "std": 20.887418488669834,
+      "count": 6
+    },
+    "milp_stats": {
+      "mean": 2015.568,
+      "median": 2015.5680000000002,
+      "std": 2.2737367544323206e-13,
+      "count": 6
+    },
+    "difference": {
+      "mean_difference": 2038.2299559324306,
+      "median_difference": 2044.4525186209712
+    }
+  },
+  "execution_time_comparison": {
+    "ppo_stats": {
+      "mean": 0.00573273499806722,
+      "median": 0.006072998046875,
+      "std": 0.0019939871399796815,
+      "count": 6
+    },
+    "milp_stats": {
+      "mean": 0.12966696421305338,
+      "median": 0.13270068168640137,
+      "std": 0.008545945233749363,
+      "count": 6
+    },
+    "ratio": {
+      "mean_ratio": 22.61869147218044,
+      "median_ratio": 21.85093435929648
+    }
+  },
+  "robustness_comparison": {
+    "PPO": {
+      "profit_by_distribution": {
+        "uniform": {
+          "mean": -33.46202428562236,
+          "std": 7.463690061148868,
+          "min": -42.61703561492489,
+          "max": -24.334867022925884
+        },
+        "normal": {
+          "mean": -11.86188757923904,
+          "std": 24.15737734203645,
+          "min": -36.515038115425966,
+          "max": 20.947239935788495
+        }
+      },
+      "mean_profit_across_distributions": -22.6619559324307,
+      "std_profit_across_distributions": 10.80006835319166,
+      "coefficient_of_variation": -0.47657264824772144,
+      "average_volatility": 15.810533701592659,
+      "robustness_score": 1.9104848010947433
+    },
+    "MILP": {
+      "profit_by_distribution": {
+        "uniform": {
+          "mean": 2015.5680000000002,
+          "std": 0.0,
+          "min": 2015.5680000000002,
+          "max": 2015.5680000000002
+        },
+        "normal": {
+          "mean": 2015.5680000000002,
+          "std": 0.0,
+          "min": 2015.5680000000002,
+          "max": 2015.5680000000002
+        }
+      },
+      "mean_profit_across_distributions": 2015.5680000000002,
+      "std_profit_across_distributions": 0.0,
+      "coefficient_of_variation": 0.0,
+      "average_volatility": 0.0,
+      "robustness_score": 1.0
+    }
+  },
+  "significance_tests": [
+    {
+      "test_name": "Welch's t-test (Profit Comparison)",
+      "statistic": 218.19933074609244,
+      "p_value": 3.8365341014758464e-11,
+      "critical_value": null,
+      "degrees_of_freedom": null,
+      "effect_size": 125.97744234325268,
+      "interpretation": "Difference is significant (p=0.0000) with large effect size (d=125.977). MILP performs better.",
+      "significant": "True"
+    },
+    {
+      "test_name": "Mann-Whitney U Test (Profit Comparison)",
+      "statistic": 36.0,
+      "p_value": 0.00277843011009903,
+      "critical_value": null,
+      "degrees_of_freedom": null,
+      "effect_size": 0.8320502943378437,
+      "interpretation": "Non-parametric test shows significant difference (p=0.0028) with large effect size (r=0.832).",
+      "significant": "True"
+    },
+    {
+      "test_name": "Execution Time Comparison (Log-transformed)",
+      "statistic": 15.281056295484206,
+      "p_value": 1.570676148644977e-05,
+      "critical_value": null,
+      "degrees_of_freedom": null,
+      "effect_size": 8.822521965699629,
+      "interpretation": "Log-transformed execution time comparison. Difference is significant (p=0.0000) with large effect size (d=8.823). MILP performs better.",
+      "significant": "True"
+    }
+  ],
+  "flexibility_analysis": {
+    "FCR": {
+      "service_type": "FCR",
+      "total_reservations": 288.0,
+      "average_reservation": 1.0,
+      "reservation_frequency": 0.5,
+      "peak_usage_hour": 12,
+      "total_revenue": 14400.0,
+      "average_revenue_per_mw": 2400.0,
+      "revenue_volatility": 0.0,
+      "reservation_ci": {
+        "lower": 0.8843069840495945,
+        "upper": 1.1156930159504055,
+        "confidence_level": 0.95
+      },
+      "revenue_ci": {
+        "lower": 2400.0,
+        "upper": 2400.0,
+        "confidence_level": 0.95
+      },
+      "relative_usage_rank": 1,
+      "relative_revenue_rank": 1
+    },
+    "aFRR": {
+      "service_type": "aFRR",
+      "total_reservations": 0.0,
+      "average_reservation": 0.0,
+      "reservation_frequency": 0.0,
+      "peak_usage_hour": 12,
+      "total_revenue": 0.0,
+      "average_revenue_per_mw": 0.0,
+      "revenue_volatility": 0.0,
+      "reservation_ci": {
+        "lower": 0.0,
+        "upper": 0.0,
+        "confidence_level": 0.95
+      },
+      "revenue_ci": {
+        "lower": 0.0,
+        "upper": 0.0,
+        "confidence_level": 0.95
+      },
+      "relative_usage_rank": 2,
+      "relative_revenue_rank": 2
+    },
+    "mFRR": {
+      "service_type": "mFRR",
+      "total_reservations": 0.0,
+      "average_reservation": 0.0,
+      "reservation_frequency": 0.0,
+      "peak_usage_hour": 12,
+      "total_revenue": 0.0,
+      "average_revenue_per_mw": 0.0,
+      "revenue_volatility": 0.0,
+      "reservation_ci": {
+        "lower": 0.0,
+        "upper": 0.0,
+        "confidence_level": 0.95
+      },
+      "revenue_ci": {
+        "lower": 0.0,
+        "upper": 0.0,
+        "confidence_level": 0.95
+      },
+      "relative_usage_rank": 3,
+      "relative_revenue_rank": 3
+    }
+  },
+  "service_comparison_matrix": "  Service  Total Reservations  Avg Reservation  ...  Avg Revenue/MW  Usage Rank  Revenue Rank\n0     FCR               288.0              1.0  ...          2400.0           1             1\n1    aFRR                 0.0              0.0  ...             0.0           2             2\n2    mFRR                 0.0              0.0  ...             0.0           3             3\n\n[3 rows x 8 columns]",
+  "confidence_intervals": {
+    "profit": {
+      "PPO": {
+        "lower": -46.67411437331327,
+        "upper": 1.3502025084518685,
+        "confidence_level": 0.95
+      },
+      "MILP": {
+        "lower": 2015.5679999999998,
+        "upper": 2015.5680000000002,
+        "confidence_level": 0.95
+      }
+    },
+    "execution_time": {
+      "PPO": {
+        "lower": 0.00344044908632344,
+        "upper": 0.008025020909811,
+        "confidence_level": 0.95
+      },
+      "MILP": {
+        "lower": 0.1198425528770519,
+        "upper": 0.13949137554905486,
+        "confidence_level": 0.95
+      }
+    },
+    "battery_utilization": {
+      "PPO": {
+        "lower": 0.14518711241630664,
+        "upper": 0.1699390802583625,
+        "confidence_level": 0.95
+      },
+      "MILP": {
+        "lower": 0.0,
+        "upper": 0.0,
+        "confidence_level": 0.95
+      }
+    }
+  },
+  "effect_sizes": {
+    "profit": 125.97744234325268,
+    "execution_time": 8.822521965699629
+  },
+  "practical_significance": {
+    "profit": "Large practical difference",
+    "execution_time": "Large practical difference"
+  },
+  "recommendations": [
+    "MILP shows statistically significant profit advantage over PPO",
+    "MILP requires significantly more execution time than PPO",
+    "FCR generates the highest flexibility revenue",
+    "Large practical difference observed in profit",
+    "Large practical difference observed in execution_time"
+  ]
+}

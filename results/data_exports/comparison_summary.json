@@ -1,0 +1,106 @@
+{
+  "config": {
+    "time_horizon": 24,
+    "episode_length": 168,
+    "error_distributions": [
+      "uniform",
+      "normal"
+    ],
+    "n_episodes_per_distribution": 3,
+    "battery_capacity_mwh": 4.0,
+    "battery_max_power_mw": 2.0,
+    "battery_efficiency": 0.95,
+    "initial_soc": 0.5,
+    "flexibility_enabled": true,
+    "conflict_strategy": "revenue_priority",
+    "measure_execution_time": true,
+    "measure_scalability": true,
+    "detailed_logging": true,
+    "random_seed": 42
+  },
+  "total_episodes": 12,
+  "successful_episodes": 12,
+  "failed_episodes": 0,
+  "ppo_results": {
+    "count": 6,
+    "profit": {
+      "mean": -22.6619559324307,
+      "std": 20.887418488669834,
+      "min": -42.61703561492489,
+      "max": 20.947239935788495,
+      "median": -28.8845186209711
+    },
+    "execution_time": {
+      "mean": 0.00573273499806722,
+      "std": 0.0019939871399796815,
+      "min": 0.002004384994506836,
+      "max": 0.008137226104736328
+    },
+    "battery_utilization": {
+      "mean": 0.15756309633733456,
+      "std": 0.010765477664325198
+    },
+    "final_soh": {
+      "mean": 0.9999054621421976,
+      "std": 6.459286598630883e-06
+    }
+  },
+  "milp_results": {
+    "count": 6,
+    "profit": {
+      "mean": 2015.568,
+      "std": 2.2737367544323206e-13,
+      "min": 2015.5680000000002,
+      "max": 2015.5680000000002,
+      "median": 2015.5680000000002
+    },
+    "execution_time": {
+      "mean": 0.12966696421305338,
+      "std": 0.008545945233749363,
+      "min": 0.11368489265441895,
+      "max": 0.13803648948669434
+    },
+    "battery_utilization": {
+      "mean": 0.0,
+      "std": 0.0
+    },
+    "final_soh": {
+      "mean": 1.0,
+      "std": 0.0
+    }
+  },
+  "profit_advantage": {
+    "uniform": 2049.0300242856224,
+    "normal": 2027.4298875792392
+  },
+  "execution_time_ratio": {
+    "uniform": 30.70166695980145,
+    "normal": 18.175911405185932
+  },
+  "robustness_metrics": {
+    "PPO": {
+      "mean_across_distributions": -22.6619559324307,
+      "std_across_distributions": 10.80006835319166,
+      "coefficient_of_variation": -0.47657264824772144
+    },
+    "MILP": {
+      "mean_across_distributions": 2015.5680000000002,
+      "std_across_distributions": 0.0,
+      "coefficient_of_variation": 0.0
+    }
+  },
+  "statistical_tests": {
+    "profit_ttest": {
+      "t_statistic": 218.19933074609244,
+      "p_value": 3.8365341014758464e-11,
+      "significant": "True"
+    },
+    "profit_mannwhitney": {
+      "u_statistic": 36.0,
+      "p_value": 0.00277843011009903,
+      "significant": "True"
+    }
+  },
+  "total_execution_time": 0.8187978267669678,
+  "timestamp": "2026-01-08T11:57:05.744212"
+}

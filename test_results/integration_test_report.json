@@ -1,0 +1,15 @@
+{
+  "timestamp": 1767789608.4508698,
+  "test_config": {
+    "time_horizon": 24,
+    "error_distributions": [
+      "uniform",
+      "normal"
+    ],
+    "n_episodes_per_distribution": 2,
+    "battery_capacity_mwh": 4.0,
+    "battery_max_power_mw": 2.0,
+    "flexibility_enabled": true
+  },
+  "results": {}
+}
