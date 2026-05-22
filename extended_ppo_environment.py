@@ -66,24 +66,44 @@ class ExtendedBatteryTradingEnv(gym.Env):
         self.forecast_horizon = FORECAST_HORIZON
         self.episode_length = 480
         
-        # Action space: 21 arbitrage + 4 FCR + 3 aFRR + 3 mFRR = 31 actions
+        # ====== ACTION SPACE: MultiDiscrete([21, 4, 3, 3]) ======
+        # The action is a vector of FOUR independent components, one per
+        # category, so the agent can combine arbitrage and all three
+        # flexibility services in the same hour. This matches what the MILP
+        # is allowed to do.
+        #
+        #   action[0] : arbitrage power level (0..20 mapped to [-2 MW, +2 MW])
+        #   action[1] : FCR  reservation level (0..3 mapped to {0, 25, 50, 75}%)
+        #   action[2] : aFRR reservation level (0..2 mapped to {0, 50, 100}%)
+        #   action[3] : mFRR reservation level (0..2 mapped to {0, 50, 100}%)
+        #
+        # The combined power request is reconciled with the battery's nominal
+        # power via the existing conflict-resolution machinery (see step()).
         self.n_arbitrage_actions = 21
-        self.n_fcr_actions = 4  # 0%, 25%, 50%, 75%
+        self.n_fcr_actions = 4   # 0%, 25%, 50%, 75%
         self.n_afrr_actions = 3  # 0%, 50%, 100%
         self.n_mfrr_actions = 3  # 0%, 50%, 100%
-        
-        total_actions = (self.n_arbitrage_actions + self.n_fcr_actions + 
-                        self.n_afrr_actions + self.n_mfrr_actions)
-        self.action_space = spaces.Discrete(total_actions)
-        
-        # Arbitrage action values (same as original)
-        self.arbitrage_values = np.linspace(-BATTERY_POWER, BATTERY_POWER, self.n_arbitrage_actions)
-        
-        # Flexibility action values (percentage of available capacity)
+
+        self.action_space = spaces.MultiDiscrete([
+            self.n_arbitrage_actions,
+            self.n_fcr_actions,
+            self.n_afrr_actions,
+            self.n_mfrr_actions,
+        ])
+
+        # Total flat-equivalent size (kept for backward-compatible diagnostics)
+        self.total_actions = (self.n_arbitrage_actions + self.n_fcr_actions +
+                              self.n_afrr_actions + self.n_mfrr_actions)
+
+        # Arbitrage values (signed power levels in MW)
+        self.arbitrage_values = np.linspace(-BATTERY_POWER, BATTERY_POWER,
+                                            self.n_arbitrage_actions)
+
+        # Flexibility reservation fractions
         self.fcr_percentages = [0.0, 0.25, 0.50, 0.75]
         self.afrr_percentages = [0.0, 0.50, 1.0]
         self.mfrr_percentages = [0.0, 0.50, 1.0]
-        
+
         # Observation space: 35 features (26 original + 9 flexibility)
         n_features = 1 + FORECAST_HORIZON + 1 + 9  # SOC + forecast + current + flexibility
         self.observation_space = spaces.Box(
@@ -92,16 +112,16 @@ class ExtendedBatteryTradingEnv(gym.Env):
             shape=(n_features,),
             dtype=np.float32
         )
-        
+
         # Price normalization constants for flexibility services
         self.max_capacity_price = 100.0  # EUR/MW/h
         self.max_energy_price = 200.0    # EUR/MWh
-        
+
         # Current flexibility reservations
         self.reserved_fcr = 0.0
         self.reserved_afrr = 0.0
         self.reserved_mfrr = 0.0
-        
+
     def reset(self, seed=None, options=None):
         """Reset environment to initial state"""
         super().reset(seed=seed)
@@ -109,19 +129,19 @@ class ExtendedBatteryTradingEnv(gym.Env):
         if self.error_gen is not None:
             self.error_gen.reset()
         self.current_step = 0
-        
+
         # Reset flexibility reservations
         self.reserved_fcr = 0.0
         self.reserved_afrr = 0.0
         self.reserved_mfrr = 0.0
-        
+
         # Random start position for longer datasets
         if self.max_steps > 1000:
             self.current_step = np.random.randint(0, min(1000, self.max_steps - 500))
-        
+
         obs = self._get_observation()
         return obs, {}
-    
+
     def _get_flexibility_opportunities(self) -> List[FlexibilityOpportunity]:
         """Get current flexibility opportunities"""
         if not self.flexibility_enabled:
@@ -131,14 +151,14 @@ class ExtendedBatteryTradingEnv(gym.Env):
                 FlexibilityOpportunity("aFRR", False, 0.0, 0.0),
                 FlexibilityOpportunity("mFRR", False, 0.0, 0.0)
             ]
-        
+
         # Get current hour and day of week
         hour = self.current_step % 24
         day_of_week = (self.current_step // 24) % 7
-        
+
         # Get flexibility services from market
         services = self.flexibility_market.get_flexibility_opportunities(hour, day_of_week)
-        
+
         # Create battery state for constraint checking
         battery_state = BatteryState(
             soc=self.battery.soc,
@@ -148,16 +168,16 @@ class ExtendedBatteryTradingEnv(gym.Env):
             reserved_mfrr=self.reserved_mfrr,
             degradation_cycles=self.battery.equivalent_cycles
         )
-        
+
         opportunities = []
         for service in services:
             # Check if service can be provided
             can_provide = self.flexibility_market.check_service_constraints(service, battery_state)
-            
+
             # Normalize prices to [0, 1] range
             capacity_price_norm = min(service.capacity_price / self.max_capacity_price, 1.0)
             energy_price_norm = min(service.energy_price / self.max_energy_price, 1.0)
-            
+
             opportunity = FlexibilityOpportunity(
                 service_type=service.service_type.value,
                 available=can_provide,
@@ -165,18 +185,18 @@ class ExtendedBatteryTradingEnv(gym.Env):
                 energy_price_normalized=energy_price_norm
             )
             opportunities.append(opportunity)
-        
+
         return opportunities
-    
+
     def _get_observation(self):
         """Construct extended observation vector with flexibility opportunities"""
         if self.current_step >= len(self.prices):
             return np.zeros(35, dtype=np.float32)
-        
+
         # Original observation components (26 features)
         soc = self.battery.soc
         current_price = self.prices[self.current_step]
-        
+
         # Forecast prices (24 features)
         forecast_prices_norm = []
         for h in range(self.forecast_horizon):
@@ -189,17 +209,17 @@ class ExtendedBatteryTradingEnv(gym.Env):
                 forecast_prices_norm.append(forecast_price / 200.0)
             else:
                 forecast_prices_norm.append(0.5)
-        
+
         current_price_norm = current_price / 200.0
-        
+
         # Flexibility opportunities (9 features: 3 services × 3 features each)
         opportunities = self._get_flexibility_opportunities()
         flexibility_features = []
-        
+
         # Ensure we have exactly 3 opportunities (FCR, aFRR, mFRR)
         service_order = ["FCR", "aFRR", "mFRR"]
         opp_dict = {opp.service_type: opp for opp in opportunities}
-        
+
         for service_type in service_order:
             if service_type in opp_dict:
                 opp = opp_dict[service_type]
@@ -211,55 +231,71 @@ class ExtendedBatteryTradingEnv(gym.Env):
             else:
                 # Default values if service not available
                 flexibility_features.extend([0.0, 0.0, 0.0])
-        
+
         # Combine all features (35 total)
         obs = np.array([
             soc,                          # 1 feature
-            *forecast_prices_norm,        # 24 features  
+            *forecast_prices_norm,        # 24 features
             current_price_norm,           # 1 feature
             *flexibility_features         # 9 features (3×3)
         ], dtype=np.float32)
-        
+
         return obs
-    
-    def _decode_action(self, action_idx):
-        """Decode action index into arbitrage and flexibility actions"""
-        action_idx = int(action_idx)
-        
-        # Initialize all actions
-        arbitrage_action = 0.0
-        fcr_percentage = 0.0
-        afrr_percentage = 0.0
-        mfrr_percentage = 0.0
-        
-        if action_idx < self.n_arbitrage_actions:
-            # Arbitrage action
-            arbitrage_action = float(self.arbitrage_values[action_idx])
-        elif action_idx < self.n_arbitrage_actions + self.n_fcr_actions:
-            # FCR action
-            fcr_idx = action_idx - self.n_arbitrage_actions
-            fcr_percentage = self.fcr_percentages[fcr_idx]
-        elif action_idx < self.n_arbitrage_actions + self.n_fcr_actions + self.n_afrr_actions:
-            # aFRR action
-            afrr_idx = action_idx - self.n_arbitrage_actions - self.n_fcr_actions
-            afrr_percentage = self.afrr_percentages[afrr_idx]
-        else:
-            # mFRR action
-            mfrr_idx = (action_idx - self.n_arbitrage_actions - 
-                       self.n_fcr_actions - self.n_afrr_actions)
-            mfrr_percentage = self.mfrr_percentages[mfrr_idx]
-        
+
+    def _decode_action(self, action):
+        """Decode a MultiDiscrete action vector into per-category levels.
+
+        Expected input: array-like of length 4 containing
+            [arbitrage_idx, fcr_idx, afrr_idx, mfrr_idx]
+
+        For backward compatibility with legacy single-action callers, a scalar
+        input is also accepted and interpreted as the legacy flat encoding
+        (21 arbitrage + 4 FCR + 3 aFRR + 3 mFRR = 31 actions).
+        """
+        # Backward-compatible scalar dispatch
+        if np.ndim(action) == 0:
+            action_idx = int(action)
+            arbitrage_action = 0.0
+            fcr_percentage = afrr_percentage = mfrr_percentage = 0.0
+            if action_idx < self.n_arbitrage_actions:
+                arbitrage_action = float(self.arbitrage_values[action_idx])
+            elif action_idx < self.n_arbitrage_actions + self.n_fcr_actions:
+                fcr_percentage = self.fcr_percentages[
+                    action_idx - self.n_arbitrage_actions]
+            elif action_idx < (self.n_arbitrage_actions + self.n_fcr_actions
+                               + self.n_afrr_actions):
+                afrr_percentage = self.afrr_percentages[
+                    action_idx - self.n_arbitrage_actions - self.n_fcr_actions]
+            else:
+                mfrr_percentage = self.mfrr_percentages[
+                    action_idx - self.n_arbitrage_actions
+                    - self.n_fcr_actions - self.n_afrr_actions]
+            return {
+                'arbitrage': arbitrage_action,
+                'fcr_percentage': fcr_percentage,
+                'afrr_percentage': afrr_percentage,
+                'mfrr_percentage': mfrr_percentage,
+            }
+
+        # Standard MultiDiscrete path
+        action = np.asarray(action).flatten().astype(int)
+        if action.size != 4:
+            raise ValueError(
+                f"MultiDiscrete action must have 4 components "
+                f"(arbitrage, fcr, afrr, mfrr); got shape {action.shape}"
+            )
+        arb_idx, fcr_idx, afrr_idx, mfrr_idx = action.tolist()
         return {
-            'arbitrage': arbitrage_action,
-            'fcr_percentage': fcr_percentage,
-            'afrr_percentage': afrr_percentage,
-            'mfrr_percentage': mfrr_percentage
+            'arbitrage': float(self.arbitrage_values[arb_idx]),
+            'fcr_percentage':  self.fcr_percentages[fcr_idx],
+            'afrr_percentage': self.afrr_percentages[afrr_idx],
+            'mfrr_percentage': self.mfrr_percentages[mfrr_idx],
         }
-    
+
     def _calculate_flexibility_revenue(self, opportunities: List[FlexibilityOpportunity]) -> Dict[str, float]:
         """
         Calculate comprehensive revenue from flexibility services
-        
+
         Returns:
             Dictionary with detailed revenue breakdown for reward function completeness
         """
@@ -272,14 +308,14 @@ class ExtendedBatteryTradingEnv(gym.Env):
                 'capacity_revenue': 0.0,
                 'energy_revenue': 0.0
             }
-        
+
         # Get actual services for revenue calculation
         hour = self.current_step % 24
         day_of_week = (self.current_step // 24) % 7
         services = self.flexibility_market.get_flexibility_opportunities(hour, day_of_week)
-        
+
         service_dict = {s.service_type.value: s for s in services}
-        
+
         # Initialize revenue breakdown
         revenue_breakdown = {
             'total_revenue': 0.0,
@@ -289,38 +325,38 @@ class ExtendedBatteryTradingEnv(gym.Env):
             'capacity_revenue': 0.0,
             'energy_revenue': 0.0
         }
-        
+
         # Calculate revenue for each reserved service
         reservations = [
             ('FCR', self.reserved_fcr),
-            ('aFRR', self.reserved_afrr), 
+            ('aFRR', self.reserved_afrr),
             ('mFRR', self.reserved_mfrr)
         ]
-        
+
         for service_type, reserved_capacity in reservations:
             if reserved_capacity > 0 and service_type in service_dict:
                 service = service_dict[service_type]
-                
+
                 # Capacity revenue (guaranteed)
                 capacity_revenue = self.flexibility_market.calculate_capacity_revenue(
                     service, reserved_capacity
                 )
-                
+
                 # Simulate activation and energy revenue
                 activation_result = self.flexibility_market.simulate_service_activation(
                     service, reserved_capacity
                 )
-                
+
                 service_total = capacity_revenue + activation_result['energy_revenue']
-                
+
                 # Update breakdown
                 revenue_breakdown[f'{service_type.lower()}_revenue'] = service_total
                 revenue_breakdown['capacity_revenue'] += capacity_revenue
                 revenue_breakdown['energy_revenue'] += activation_result['energy_revenue']
                 revenue_breakdown['total_revenue'] += service_total
-        
+
         return revenue_breakdown
-    
+
     def _resolve_conflicts(self, actions: Dict, available_power: float) -> Dict:
         """
         Resolve conflicts between arbitrage and flexibility services
@@ -328,79 +364,79 @@ class ExtendedBatteryTradingEnv(gym.Env):
         """
         # Make a deep copy to avoid modifying the original actions
         resolved_actions = copy.deepcopy(actions)
-        
+
         # Calculate total power demand
         arbitrage_power = abs(resolved_actions['arbitrage'])
-        
+
         # Calculate flexibility reservations
         fcr_power = resolved_actions['fcr_percentage'] * available_power
-        afrr_power = resolved_actions['afrr_percentage'] * available_power  
+        afrr_power = resolved_actions['afrr_percentage'] * available_power
         mfrr_power = resolved_actions['mfrr_percentage'] * available_power
-        
+
         total_flexibility = fcr_power + afrr_power + mfrr_power
         total_demand = arbitrage_power + total_flexibility
-        
+
         # If total demand exceeds available power, apply configured prioritization strategy
         if total_demand > available_power:
-            
+
             if self.conflict_strategy == 'revenue_priority':
                 # Strategy 1: Revenue-based prioritization (flexibility services first)
                 resolved_actions = self._apply_revenue_priority_strategy(resolved_actions, available_power)
-                
+
             elif self.conflict_strategy == 'arbitrage_priority':
                 # Strategy 2: Arbitrage-first prioritization
                 resolved_actions = self._apply_arbitrage_priority_strategy(resolved_actions, available_power)
-                
+
             elif self.conflict_strategy == 'equal_priority':
                 # Strategy 3: Equal scaling of all actions
                 resolved_actions = self._apply_equal_priority_strategy(resolved_actions, available_power, total_demand)
-                
+
             else:
                 # Default to revenue priority
                 resolved_actions = self._apply_revenue_priority_strategy(resolved_actions, available_power)
-        
+
         return resolved_actions
-    
+
     def _apply_revenue_priority_strategy(self, actions: Dict, available_power: float) -> Dict:
         """Apply revenue-based prioritization strategy"""
         # Make a copy to avoid modifying the original
         result_actions = copy.deepcopy(actions)
-        
+
         arbitrage_power = abs(result_actions['arbitrage'])
         fcr_power = result_actions['fcr_percentage'] * available_power
-        afrr_power = result_actions['afrr_percentage'] * available_power  
+        afrr_power = result_actions['afrr_percentage'] * available_power
         mfrr_power = result_actions['mfrr_percentage'] * available_power
-        
+
         # Get current flexibility opportunities for revenue estimation
         hour = self.current_step % 24
         day_of_week = (self.current_step // 24) % 7
         services = self.flexibility_market.get_flexibility_opportunities(hour, day_of_week)
         service_dict = {s.service_type.value: s for s in services}
-        
+
         # Calculate revenue density (EUR/MW/h) for each service
         service_priorities = []
-        
+
         if 'FCR' in service_dict and fcr_power > 0:
-            fcr_revenue_density = (service_dict['FCR'].capacity_price + 
+            fcr_revenue_density = (service_dict['FCR'].capacity_price +
                                  service_dict['FCR'].energy_price * service_dict['FCR'].activation_probability)
             service_priorities.append(('fcr_percentage', fcr_power, fcr_revenue_density))
-        
+
         if 'aFRR' in service_dict and afrr_power > 0:
-            afrr_revenue_density = (service_dict['aFRR'].capacity_price + 
+            afrr_revenue_density = (service_dict['aFRR'].capacity_price +
                                   service_dict['aFRR'].energy_price * service_dict['aFRR'].activation_probability)
             service_priorities.append(('afrr_percentage', afrr_power, afrr_revenue_density))
-        
+
         if 'mFRR' in service_dict and mfrr_power > 0:
-            mfrr_revenue_density = (service_dict['mFRR'].capacity_price + 
+            mfrr_revenue_density = (service_dict['mFRR'].capacity_price +
                                   service_dict['mFRR'].energy_price * service_dict['mFRR'].activation_probability)
             service_priorities.append(('mfrr_percentage', mfrr_power, mfrr_revenue_density))
-        
+
         # Sort by revenue density (highest first)
         service_priorities.sort(key=lambda x: x[2], reverse=True)
-        
+
         # Allocate power based on priority
         remaining_power = available_power
-        
+
         # First, allocate to flexibility services by priority
         for service_key, requested_power, _ in service_priorities:
             if remaining_power >= requested_power:
@@ -415,7 +451,7 @@ class ExtendedBatteryTradingEnv(gym.Env):
                 else:
                     # No power available
                     result_actions[service_key] = 0.0
-        
+
         # Finally, allocate remaining power to arbitrage
         if remaining_power >= arbitrage_power:
             # Full arbitrage allocation possible
@@ -427,31 +463,31 @@ class ExtendedBatteryTradingEnv(gym.Env):
         else:
             # No power available for arbitrage
             result_actions['arbitrage'] = 0.0
-            
+
         return result_actions
-    
+
     def _apply_arbitrage_priority_strategy(self, actions: Dict, available_power: float) -> Dict:
         """Apply arbitrage-first prioritization strategy"""
         # Make a copy to avoid modifying the original
         result_actions = copy.deepcopy(actions)
-        
+
         arbitrage_power = abs(result_actions['arbitrage'])
-        
+
         # Allocate to arbitrage first
         remaining_power = available_power - arbitrage_power
-        
+
         if remaining_power < 0:
             # Not enough power for full arbitrage, scale down
             scale_factor = available_power / arbitrage_power if arbitrage_power > 0 else 0
             result_actions['arbitrage'] *= scale_factor
             remaining_power = 0
-        
+
         # Allocate remaining power to flexibility services proportionally
         fcr_power = result_actions['fcr_percentage'] * available_power
-        afrr_power = result_actions['afrr_percentage'] * available_power  
+        afrr_power = result_actions['afrr_percentage'] * available_power
         mfrr_power = result_actions['mfrr_percentage'] * available_power
         total_flexibility_requested = fcr_power + afrr_power + mfrr_power
-        
+
         if total_flexibility_requested > 0 and remaining_power > 0:
             if remaining_power >= total_flexibility_requested:
                 # Full allocation possible for all flexibility services
@@ -467,51 +503,57 @@ class ExtendedBatteryTradingEnv(gym.Env):
             result_actions['fcr_percentage'] = 0.0
             result_actions['afrr_percentage'] = 0.0
             result_actions['mfrr_percentage'] = 0.0
-            
+
         return result_actions
-    
+
     def _apply_equal_priority_strategy(self, actions: Dict, available_power: float, total_demand: float) -> Dict:
         """Apply equal scaling prioritization strategy"""
         # Make a copy to avoid modifying the original
         result_actions = copy.deepcopy(actions)
-        
+
         # Calculate scale factor
         scale_factor = available_power / total_demand if total_demand > 0 else 1.0
-        
+
         # Scale all actions equally
         result_actions['arbitrage'] *= scale_factor
         result_actions['fcr_percentage'] *= scale_factor
         result_actions['afrr_percentage'] *= scale_factor
         result_actions['mfrr_percentage'] *= scale_factor
-        
+
         return result_actions
-    
+
     def set_conflict_strategy(self, strategy: str):
         """
         Set the conflict resolution strategy
-        
+
         Args:
             strategy: One of 'revenue_priority', 'arbitrage_priority', 'equal_priority'
         """
         valid_strategies = ['revenue_priority', 'arbitrage_priority', 'equal_priority']
         if strategy not in valid_strategies:
             raise ValueError(f"Invalid strategy. Must be one of: {valid_strategies}")
-        
+
         self.conflict_strategy = strategy
-    
-    def step(self, action_idx):
-        """Execute action and return reward with comprehensive flexibility services integration"""
+
+    def step(self, action):
+        """Execute action and return reward.
+
+        `action` is a MultiDiscrete vector of 4 components
+        [arbitrage_idx, fcr_idx, afrr_idx, mfrr_idx]. Scalar integers are
+        also accepted for backward compatibility with legacy callers (they
+        get decoded via the flat 31-action encoding).
+        """
         # Decode action
-        actions = self._decode_action(action_idx)
-        
+        actions = self._decode_action(action)
+
         # Get current price and flexibility opportunities
         true_price = self.prices[self.current_step]
         opportunities = self._get_flexibility_opportunities()
-        
+
         # Resolve conflicts between arbitrage and flexibility
         available_power = self.battery.max_power
         actions = self._resolve_conflicts(actions, available_power)
-        
+
         # Execute arbitrage action
         arbitrage_energy = self.battery.step(actions['arbitrage'])
         # BUG FIX: sign convention is enforced by Battery.step():
@@ -519,30 +561,33 @@ class ExtendedBatteryTradingEnv(gym.Env):
         # - arbitrage_energy < 0 -> discharging (energy sold to grid),    profit is a revenue
         # Matches the convention used in BatteryTradingEnvClean (drl_flexibility_analysis.py)
         arbitrage_profit = -arbitrage_energy * true_price
-        
+
         # Update flexibility reservations
         self.reserved_fcr = actions['fcr_percentage'] * available_power
         self.reserved_afrr = actions['afrr_percentage'] * available_power
         self.reserved_mfrr = actions['mfrr_percentage'] * available_power
-        
+
         # Calculate comprehensive flexibility revenue
         flexibility_revenue_breakdown = self._calculate_flexibility_revenue(opportunities)
         flexibility_revenue = flexibility_revenue_breakdown['total_revenue']
-        
+
         # Calculate degradation cost
         total_energy_used = abs(arbitrage_energy)
         degradation_cost = total_energy_used * DEGRADATION_COST_PER_MWH / (2 * 6000)
-        
+
         # SOC violation penalty
         soc_penalty = 0.0
         if self.battery.soc > SOC_MAX:
             soc_penalty = -abs(self.battery.soc - SOC_MAX) * SOC_VIOLATION_PENALTY
         elif self.battery.soc < SOC_MIN:
             soc_penalty = -abs(self.battery.soc - SOC_MIN) * SOC_VIOLATION_PENALTY
-        
-        # Conflict resolution penalty (if actions were scaled down due to conflicts)
+
+        # Conflict resolution penalty (if actions were scaled down due to conflicts).
+        # Use the pre-conflict-resolution arbitrage value, recovered by decoding
+        # the raw action once more (cheap).
         conflict_penalty = 0.0
-        original_arbitrage = self.arbitrage_values[action_idx] if action_idx < self.n_arbitrage_actions else 0.0
+        pre_actions = self._decode_action(action)
+        original_arbitrage = pre_actions['arbitrage']
         if abs(actions['arbitrage'] - original_arbitrage) > 0.01:  # Action was modified
             # Small penalty for not being able to execute desired action
             conflict_penalty = -0.1 * abs(actions['arbitrage'] - original_arbitrage)

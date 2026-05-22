@@ -392,42 +392,35 @@ class ComparisonEngine:
             error_sequence=error_sequence
         )
     
-    def _select_greedy_action(self, obs: np.ndarray, env: ExtendedBatteryTradingEnv) -> int:
+    def _select_greedy_action(self, obs: np.ndarray, env: ExtendedBatteryTradingEnv) -> np.ndarray:
         """
         Greedy price-threshold heuristic used ONLY as a fallback baseline when no
         trained PPO model is supplied. This is NOT a real PPO policy.
-        
-        Action encoding (see ExtendedBatteryTradingEnv.arbitrage_values):
-            arbitrage_values = np.linspace(-BATTERY_POWER, BATTERY_POWER, 21)
-        Therefore:
-            action_idx = 5  -> -1.0 MW (negative action -> Battery.step discharges)
-            action_idx = 15 -> +1.0 MW (positive action -> Battery.step charges)
-        
-        BUG FIX: the previous version had the action indices swapped relative to
-        their comments, so the heuristic was charging at high prices and discharging
-        at low prices (i.e. losing money on every cycle).
-        
+
+        Returns a MultiDiscrete action vector [arb_idx, fcr_idx, afrr_idx, mfrr_idx]
+        matching the environment's new action space. The heuristic charges at low
+        prices and discharges at high prices, and reserves 50% aFRR by default.
+
         Args:
             obs: Current observation
             env: Environment instance
-            
+
         Returns:
-            Selected action index
+            Action vector of shape (4,) with dtype int.
         """
         # Extract current price from observation (index 25 is current_price_norm,
         # normalized by 200.0 EUR/MWh in ExtendedBatteryTradingEnv._get_observation)
         current_price_norm = obs[25] if len(obs) > 25 else 0.5
         current_price = current_price_norm * 200.0
-        
-        # Simple strategy: charge when price is low, discharge when high
-        price_threshold = 60.0  # EUR/MWh
-        
-        if current_price < price_threshold:
-            # Low price -> charge (positive arbitrage power)
-            return 15  # +1.0 MW: moderate charging action
-        else:
-            # High price -> discharge (negative arbitrage power)
-            return 5   # -1.0 MW: moderate discharging action
+
+        # Simple strategy: charge when price is low, discharge when high.
+        # Arbitrage index 15 = +1.0 MW (charge), index 5 = -1.0 MW (discharge)
+        price_threshold = 60.0
+        arb_idx = 15 if current_price < price_threshold else 5
+
+        # Default flexibility split: 50% aFRR, no FCR, no mFRR.
+        # (FCR cannot be combined with strong arbitrage because of SOC symmetry.)
+        return np.array([arb_idx, 0, 1, 0], dtype=int)
     
     def run_comparison(self, prices: List[float]) -> ComparisonSummary:
         """

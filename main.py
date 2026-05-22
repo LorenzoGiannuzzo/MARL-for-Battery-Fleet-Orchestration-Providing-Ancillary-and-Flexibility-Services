@@ -547,11 +547,15 @@ def run_ppo_day(
     for _ in range(len(daily_prices)):
         if ppo_model is not None:
             action, _ = ppo_model.predict(obs, deterministic=True)
-            action = int(action)
+            # Stable-baselines3 returns the vector directly for MultiDiscrete spaces
+            if np.ndim(action) == 0:
+                action = int(action)
         else:
-            # Fallback greedy: charge cheap, discharge expensive
+            # Greedy fallback (MultiDiscrete vector): charge cheap, discharge expensive,
+            # plus 50% aFRR by default
             cur_price = obs[25] * 200.0 if len(obs) > 25 else 0.0
-            action = 15 if cur_price < 60.0 else 5  # see comparison_engine._select_greedy_action
+            arb_idx = 15 if cur_price < 60.0 else 5
+            action = np.array([arb_idx, 0, 1, 0], dtype=int)
 
         obs, _reward, done, truncated, info = env.step(action)
         total_arb += info.get("arbitrage_profit", 0.0)
@@ -1037,6 +1041,7 @@ def main() -> int:
     generate_all_plots(df, paths.figures,
                        representative_day=rep_day,
                        primary_distribution=primary,
+                       train_distribution=cfg.train_error_distribution,
                        verbose=cfg.verbose)
 
     print(f"\nAll outputs saved under: {paths.root.resolve()}")

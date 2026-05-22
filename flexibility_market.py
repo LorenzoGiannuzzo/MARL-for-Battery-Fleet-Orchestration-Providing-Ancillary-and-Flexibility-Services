@@ -65,46 +65,66 @@ class FlexibilityMarket:
         if random_seed is not None:
             np.random.seed(random_seed)
         
-        # ARERA tariff structure (EUR/MW/h for capacity, EUR/MWh for energy)
+        # ====================================================================
+        # CALIBRATED ARERA tariff structure (EUR/MW/h for capacity, EUR/MWh for energy)
+        #
+        # Values calibrated on:
+        #   - Magnus Energy 'Developments in balancing and capacity markets', Nov 2025
+        #     (European FCR Cooperation 2024 average ~50 EUR/MW/h)
+        #   - ACER CHEST database, 'Volume-weighted aFRR prices Italy 2022'
+        #     (Italian aFRR upward: 411.99 EUR/MWh)
+        #   - Terna 'Report on Balancing 2022-2023' (download.terna.it)
+        #   - ARERA TIDE Delibera 345/2023/R/eel
+        #
+        # Note: FCR is treated as a forward-looking market-based service per the
+        # TIDE roadmap (full implementation by 2029). In current Italian practice,
+        # FCR is a mandatory non-remunerated obligation for conventional units.
+        # See accompanying file 'Italian_BESS_Markets_Reference.xlsx' for full
+        # documentation of the calibration choices.
+        # ====================================================================
         self.arera_tariffs = {
             ServiceType.FCR: {
-                'capacity_base': 45.0,    # EUR/MW/h base capacity payment
-                'energy_base': 120.0,     # EUR/MWh energy payment
+                'capacity_base': 50.0,    # EUR/MW/h - aligned to FCR Cooperation EU 2024
+                'energy_base': 100.0,     # EUR/MWh - placeholder (bundled in capacity in practice)
                 'response_time': 30,      # seconds
                 'min_capacity': 1.0,      # MW
                 'max_duration': 24,       # hours
                 'min_duration': 4,        # hours
             },
             ServiceType.AFRR: {
-                'capacity_base': 35.0,    # EUR/MW/h base capacity payment
-                'energy_base': 100.0,     # EUR/MWh energy payment  
+                'capacity_base': 25.0,    # EUR/MW/h - Italian aFRR benchmark 2022-2024
+                'energy_base': 250.0,     # EUR/MWh - ACER CHEST Italy upward 2022 ~412, conservative
                 'response_time': 200,     # seconds
                 'min_capacity': 1.0,      # MW
                 'max_duration': 24,       # hours
                 'min_duration': 4,        # hours
             },
             ServiceType.MFRR: {
-                'capacity_base': 25.0,    # EUR/MW/h base capacity payment
-                'energy_base': 80.0,      # EUR/MWh energy payment
+                'capacity_base': 12.0,    # EUR/MW/h - European mFRR/MARI benchmark
+                'energy_base': 180.0,     # EUR/MWh - European mFRR activation prices
                 'response_time': 900,     # seconds (15 minutes)
                 'min_capacity': 1.0,      # MW
                 'max_duration': 24,       # hours
                 'min_duration': 1,        # hours
             }
         }
-        
+
         # BSP (Balancing Service Provider) costs according to ARERA
         self.bsp_costs = {
             'qualification_fee': 5000.0,     # EUR/year - BSP qualification
             'metering_cost': 2000.0,          # EUR/year - metering requirements
             'communication_cost': 1500.0,    # EUR/year - communication systems
         }
-        
-        # Historical activation probabilities based on MSD data
+
+        # ====================================================================
+        # CALIBRATED historical activation probabilities
+        # Source: Terna 'Report on Balancing 2022-2023', cross-referenced with
+        # ENTSO-E aFRR activation data for Italy 2023-2024.
+        # ====================================================================
         self.historical_probabilities = {
-            ServiceType.FCR: 0.15,    # 15% average activation probability
-            ServiceType.AFRR: 0.25,   # 25% average activation probability  
-            ServiceType.MFRR: 0.35,   # 35% average activation probability
+            ServiceType.FCR: 0.10,    # FCR: continuous low-volume activation; capacity payment dominates
+            ServiceType.AFRR: 0.30,   # aFRR: most-activated service in Italy due to renewable integration
+            ServiceType.MFRR: 0.20,   # mFRR: activated less than aFRR; matches Terna 2022-2023 statistics
         }
         
         # Seasonal and hourly multipliers for realistic pricing

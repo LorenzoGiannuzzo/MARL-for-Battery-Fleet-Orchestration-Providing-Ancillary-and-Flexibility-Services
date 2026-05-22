@@ -94,8 +94,8 @@ class ItalianMarketConfig:
         # ARERA tariff structure (updated values based on recent regulations)
         self.arera_flexibility_tariffs = {
             'FCR': {
-                'capacity_price_base': 45.0,      # EUR/MW/h
-                'energy_price_base': 120.0,       # EUR/MWh
+                'capacity_price_base': 50.0,      # EUR/MW/h - calibrated to FCR Cooperation EU 2024 (Magnus Energy 2025)
+                'energy_price_base': 100.0,       # EUR/MWh - FCR bundled in capacity, placeholder
                 'seasonal_multiplier': {
                     'winter': 1.2,    # Dec, Jan, Feb
                     'spring': 1.0,    # Mar, Apr, May
@@ -109,8 +109,8 @@ class ItalianMarketConfig:
                 }
             },
             'aFRR': {
-                'capacity_price_base': 35.0,      # EUR/MW/h
-                'energy_price_base': 100.0,       # EUR/MWh
+                'capacity_price_base': 25.0,      # EUR/MW/h - calibrated to Italian aFRR benchmark 2022-2024
+                'energy_price_base': 250.0,       # EUR/MWh - calibrated to ACER CHEST Italy aFRR 2022 (412 EUR/MWh)
                 'seasonal_multiplier': {
                     'winter': 1.15,
                     'spring': 1.0,
@@ -124,8 +124,8 @@ class ItalianMarketConfig:
                 }
             },
             'mFRR': {
-                'capacity_price_base': 25.0,      # EUR/MW/h
-                'energy_price_base': 80.0,        # EUR/MWh
+                'capacity_price_base': 12.0,      # EUR/MW/h - calibrated to European mFRR/MARI benchmark
+                'energy_price_base': 180.0,       # EUR/MWh - calibrated to European mFRR activation prices
                 'seasonal_multiplier': {
                     'winter': 1.1,
                     'spring': 1.0,
@@ -139,7 +139,7 @@ class ItalianMarketConfig:
                 }
             }
         }
-        
+
         # BSP (Balancing Service Provider) costs
         self.bsp_costs = {
             'qualification_fee_annual': 5000.0,    # EUR/year
@@ -149,11 +149,11 @@ class ItalianMarketConfig:
             'audit_cost_annual': 1000.0,           # EUR/year
             'insurance_cost_annual': 2500.0,       # EUR/year
         }
-        
+
         # Historical activation probabilities (based on Terna data 2020-2023)
         self.historical_activation_prob = {
             'FCR': {
-                'mean': 0.15,
+                'mean': 0.10,
                 'std': 0.08,
                 'seasonal_variation': {
                     'winter': 1.3,    # Higher activation in winter
@@ -163,7 +163,7 @@ class ItalianMarketConfig:
                 }
             },
             'aFRR': {
-                'mean': 0.25,
+                'mean': 0.30,
                 'std': 0.12,
                 'seasonal_variation': {
                     'winter': 1.2,
@@ -173,7 +173,7 @@ class ItalianMarketConfig:
                 }
             },
             'mFRR': {
-                'mean': 0.35,
+                'mean': 0.20,
                 'std': 0.15,
                 'seasonal_variation': {
                     'winter': 1.15,
