@@ -117,7 +117,8 @@ def save_figure(fig: plt.Figure, out_dir: Path, name: str) -> List[Path]:
 # Individual figures
 # ---------------------------------------------------------------------------
 
-def plot_cumulative_profit(df: pd.DataFrame, out_dir: Path) -> List[Path]:
+def plot_cumulative_profit(df: pd.DataFrame, out_dir: Path,
+                           title_suffix: str = "") -> List[Path]:
     """Cumulative net profit over the horizon for MILP and PPO."""
     fig, ax = plt.subplots(figsize=(FIG_WIDTH_DOUBLE, 3.0))
     ax.plot(df["day"], df["milp_cumulative"] / 1000.0,
@@ -140,18 +141,18 @@ def plot_cumulative_profit(df: pd.DataFrame, out_dir: Path) -> List[Path]:
                         interpolate=True, label="PPO advantage")
     ax.set_xlabel("Day of year")
     ax.set_ylabel("Cumulative net profit (k\u20ac)")
-    ax.set_title("Cumulative net profit: MILP vs PPO")
+    ax.set_title(f"Cumulative net profit: MILP vs PPO{title_suffix}")
     ax.legend(loc="upper left", ncol=2)
     ax.set_xlim(df["day"].min(), df["day"].max())
     return save_figure(fig, out_dir, "01_cumulative_profit")
 
 
-def plot_daily_profit_distribution(df: pd.DataFrame, out_dir: Path) -> List[Path]:
+def plot_daily_profit_distribution(df: pd.DataFrame, out_dir: Path,
+                                   title_suffix: str = "") -> List[Path]:
     """Side-by-side daily profit distributions: histogram + boxplot."""
     fig, axes = plt.subplots(1, 2, figsize=(FIG_WIDTH_DOUBLE, 3.0),
                              gridspec_kw={"width_ratios": [3, 1]})
 
-    # Left: histogram
     ax = axes[0]
     data_milp = df["milp_net_profit"].values
     data_ppo = df["ppo_net_profit"].values
@@ -166,10 +167,9 @@ def plot_daily_profit_distribution(df: pd.DataFrame, out_dir: Path) -> List[Path
     ax.axvline(np.mean(data_ppo), color=COLORS["PPO"], linestyle="--", linewidth=1.0)
     ax.set_xlabel("Daily net profit (\u20ac)")
     ax.set_ylabel("Number of days")
-    ax.set_title("Daily profit distribution")
+    ax.set_title(f"Daily profit distribution{title_suffix}")
     ax.legend(loc="upper right")
 
-    # Right: boxplot
     ax = axes[1]
     bp = ax.boxplot([data_milp, data_ppo],
                     labels=["MILP", "PPO"],
@@ -188,7 +188,8 @@ def plot_daily_profit_distribution(df: pd.DataFrame, out_dir: Path) -> List[Path
     return save_figure(fig, out_dir, "02_daily_profit_distribution")
 
 
-def plot_revenue_breakdown(df: pd.DataFrame, out_dir: Path) -> List[Path]:
+def plot_revenue_breakdown(df: pd.DataFrame, out_dir: Path,
+                           title_suffix: str = "") -> List[Path]:
     """Stacked bar of annual revenue components for MILP and PPO."""
     components = {
         "Arbitrage":  (df["milp_arbitrage"].sum(),    df["ppo_arbitrage"].sum()),
@@ -234,13 +235,13 @@ def plot_revenue_breakdown(df: pd.DataFrame, out_dir: Path) -> List[Path]:
     ax.axhline(0, color="black", linewidth=0.5)
     ax.set_xticks(x); ax.set_xticklabels(["MILP", "PPO"])
     ax.set_ylabel("Annual revenue (k\u20ac)")
-    ax.set_title("Revenue breakdown by source")
+    ax.set_title(f"Revenue breakdown by source{title_suffix}")
     ax.legend(loc="upper right", fontsize=7, ncol=1)
     fig.tight_layout()
     return save_figure(fig, out_dir, "03_revenue_breakdown")
 
 
-def plot_profit_difference(df: pd.DataFrame, out_dir: Path) -> List[Path]:
+def plot_profit_difference(df: pd.DataFrame, out_dir: Path, title_suffix: str = "") -> List[Path]:
     """Daily profit difference (MILP - PPO) over time, with cumulative gap."""
     diff = df["milp_net_profit"] - df["ppo_net_profit"]
     cum_diff = diff.cumsum()
@@ -252,7 +253,7 @@ def plot_profit_difference(df: pd.DataFrame, out_dir: Path) -> List[Path]:
     ax.bar(df["day"], diff, color=colors_bar, width=1.0, alpha=0.7)
     ax.axhline(0, color="black", linewidth=0.5)
     ax.set_ylabel("Daily (MILP - PPO) (\u20ac)")
-    ax.set_title("Daily profit gap and cumulative gap")
+    ax.set_title(f"Daily profit gap and cumulative gap{title_suffix}")
     milp_wins = int((diff > 0).sum())
     ppo_wins  = int((diff < 0).sum())
     ax.text(0.02, 0.95,
@@ -280,7 +281,7 @@ def plot_profit_difference(df: pd.DataFrame, out_dir: Path) -> List[Path]:
     return save_figure(fig, out_dir, "04_profit_difference")
 
 
-def plot_execution_time(df: pd.DataFrame, out_dir: Path) -> List[Path]:
+def plot_execution_time(df: pd.DataFrame, out_dir: Path, title_suffix: str = "") -> List[Path]:
     """Per-day execution time for both algorithms, log scale, plus ratio."""
     fig, axes = plt.subplots(1, 2, figsize=(FIG_WIDTH_DOUBLE, 2.8),
                              gridspec_kw={"width_ratios": [2.2, 1]})
@@ -291,7 +292,7 @@ def plot_execution_time(df: pd.DataFrame, out_dir: Path) -> List[Path]:
                 color=COLORS["PPO"],  label="PPO",  linewidth=0.9)
     ax.set_xlabel("Day of year")
     ax.set_ylabel("Execution time (s, log scale)")
-    ax.set_title("Daily execution time per 24-hour horizon")
+    ax.set_title(f"Daily execution time per 24-hour horizon{title_suffix}")
     ax.legend(loc="best")
 
     ax = axes[1]
@@ -309,7 +310,7 @@ def plot_execution_time(df: pd.DataFrame, out_dir: Path) -> List[Path]:
     return save_figure(fig, out_dir, "05_execution_time")
 
 
-def plot_soh_evolution(df: pd.DataFrame, out_dir: Path) -> List[Path]:
+def plot_soh_evolution(df: pd.DataFrame, out_dir: Path, title_suffix: str = "") -> List[Path]:
     """State-of-health proxy over the annual horizon (cumulative throughput)."""
     # Simple linear SOH model consistent with the marginal degradation cost:
     # SOH(t) = 1 - throughput(t) / (2 * cycle_life * capacity_mwh)
@@ -330,12 +331,12 @@ def plot_soh_evolution(df: pd.DataFrame, out_dir: Path) -> List[Path]:
                label="End-of-warranty (80%)")
     ax.set_xlabel("Day of year")
     ax.set_ylabel("State of health (%)")
-    ax.set_title("Cumulative cycle aging (linear LCOS model)")
+    ax.set_title(f"Cumulative cycle aging (linear LCOS model){title_suffix}")
     ax.legend(loc="lower left")
     return save_figure(fig, out_dir, "06_soh_evolution")
 
 
-def plot_profit_scatter(df: pd.DataFrame, out_dir: Path) -> List[Path]:
+def plot_profit_scatter(df: pd.DataFrame, out_dir: Path, title_suffix: str = "") -> List[Path]:
     """Scatter of daily MILP vs PPO profit with diagonal reference."""
     fig, ax = plt.subplots(figsize=(FIG_WIDTH_ONE_HALF, FIG_WIDTH_ONE_HALF))
     ax.scatter(df["ppo_net_profit"], df["milp_net_profit"],
@@ -347,7 +348,7 @@ def plot_profit_scatter(df: pd.DataFrame, out_dir: Path) -> List[Path]:
             label="MILP = PPO")
     ax.set_xlabel("PPO daily profit (\u20ac)")
     ax.set_ylabel("MILP daily profit (\u20ac)")
-    ax.set_title("Per-day profit comparison")
+    ax.set_title(f"Per-day profit comparison{title_suffix}")
     ax.legend(loc="upper left")
     ax.set_aspect("equal", adjustable="box")
     # Colorbar
@@ -540,21 +541,136 @@ def plot_robustness_summary(df: pd.DataFrame, out_dir: Path) -> List[Path]:
 # Master function
 # ---------------------------------------------------------------------------
 
+def write_index(out_dir: Path,
+                eval_dists: List[str],
+                primary_dist: Optional[str],
+                train_dist: Optional[str]) -> Path:
+    """Write a human-readable INDEX.md that explains the figure organization
+    and which plots correspond to which sections of a typical paper.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    md = []
+    md.append("# Figure index")
+    md.append("")
+    md.append("This folder contains all the figures produced by the comparison "
+              "pipeline. Each figure is saved both as `.pdf` (vector, for the "
+              "paper) and `.png` (raster preview at 300 dpi).")
+    md.append("")
+    md.append(f"- Train distribution (PPO pretraining + retraining): "
+              f"**{train_dist}**")
+    md.append(f"- Eval distributions (MILP and trained PPO benchmarked on each): "
+              f"**{', '.join(eval_dists)}**")
+    if primary_dist:
+        md.append(f"- Primary distribution for the representative-day plot: "
+                  f"**{primary_dist}**")
+    md.append("")
+    md.append("## Organization")
+    md.append("")
+    md.append("```")
+    md.append("figures/")
+    md.append("├── INDEX.md                              (this file)")
+    md.append("├── per_distribution/                     (single-distribution analyses)")
+    for d in eval_dists:
+        md.append(f"│   ├── {d}/")
+        md.append(f"│   │   ├── 01_cumulative_profit.{{pdf,png}}")
+        md.append(f"│   │   ├── 02_daily_profit_distribution.{{pdf,png}}")
+        md.append(f"│   │   ├── 03_revenue_breakdown.{{pdf,png}}")
+        md.append(f"│   │   ├── 04_profit_difference.{{pdf,png}}")
+        md.append(f"│   │   ├── 05_execution_time.{{pdf,png}}")
+        md.append(f"│   │   ├── 06_soh_evolution.{{pdf,png}}")
+        md.append(f"│   │   ├── 07_profit_scatter.{{pdf,png}}")
+        if d == primary_dist:
+            md.append(f"│   │   └── 08_representative_day.{{pdf,png}}  "
+                      f"(only for the primary distribution)")
+    md.append("└── cross_distribution/                   (robustness analyses)")
+    md.append("    ├── 09_cross_distribution_boxplot.{pdf,png}")
+    md.append("    └── 10_robustness_summary.{pdf,png}")
+    md.append("```")
+    md.append("")
+    md.append("## What each figure shows")
+    md.append("")
+    md.append("**Single-distribution plots** (under `per_distribution/<name>/`) "
+              "describe the behavior of MILP and PPO on a single evaluation "
+              "distribution. They are useful for the *deep-dive* section of "
+              "the paper, where one specific scenario is described in detail.")
+    md.append("")
+    md.append("- `01_cumulative_profit`: annual profit trajectory, with shaded "
+              "regions for the algorithm with the lead. The classic abstract figure.")
+    md.append("- `02_daily_profit_distribution`: histogram + box of daily net "
+              "profit. Shows skewness, modality, and outliers.")
+    md.append("- `03_revenue_breakdown`: stacked bar of arbitrage, FCR, aFRR, "
+              "mFRR, degradation, side-by-side for MILP and PPO. Net profit is "
+              "annotated explicitly.")
+    md.append("- `04_profit_difference`: daily (MILP - PPO) bar with cumulative "
+              "gap below. Useful for identifying *which days* the gap accumulates.")
+    md.append("- `05_execution_time`: MILP vs PPO execution time per day on log "
+              "scale, plus the time-ratio boxplot.")
+    md.append("- `06_soh_evolution`: state-of-health proxy for both algorithms "
+              "based on cumulative throughput.")
+    md.append("- `07_profit_scatter`: per-day MILP vs PPO scatter with diagonal "
+              "reference, color-coded by daily price volatility.")
+    md.append("- `08_representative_day`: 24-hour snapshot of PUN price, SOC "
+              "trajectories, and arbitrage power, on the median-volatility day. "
+              "The *qualitative* result. Available only for the primary "
+              "distribution to avoid clutter.")
+    md.append("")
+    md.append("**Cross-distribution plots** (under `cross_distribution/`) "
+              "describe the robustness of the two algorithms across the four "
+              "forecast-error distributions. They are the key figures for the "
+              "*robustness* section of the paper.")
+    md.append("")
+    md.append("- `09_cross_distribution_boxplot`: grouped boxplot of daily "
+              "profit for (algorithm, distribution).")
+    md.append("- `10_robustness_summary`: grouped bar of annual cumulative "
+              "profit, with the coefficient of variation (CV) of each "
+              "algorithm annotated in the legend. **This is the headline "
+              "figure for the robustness section.** Lower CV = more robust to "
+              "forecast-error structure.")
+    md.append("")
+    md.append("## Suggested mapping to paper figures")
+    md.append("")
+    md.append("- Figure 1 (abstract / introduction teaser): "
+              "`per_distribution/<primary>/01_cumulative_profit` "
+              "+ `cross_distribution/10_robustness_summary` as a two-panel.")
+    md.append("- Figure 2 (qualitative): "
+              "`per_distribution/<primary>/08_representative_day`.")
+    md.append("- Figure 3 (economic detail): "
+              "`per_distribution/<primary>/03_revenue_breakdown`.")
+    md.append("- Figure 4 (robustness): "
+              "`cross_distribution/09_cross_distribution_boxplot`.")
+    md.append("- Figure 5 (computational comparison): "
+              "`per_distribution/<primary>/05_execution_time`.")
+    md.append("- Supplementary: everything else.")
+
+    path = out_dir / "INDEX.md"
+    path.write_text("\n".join(md))
+    return path
+
+
 def generate_all_plots(df: pd.DataFrame,
                        out_dir: Path,
                        representative_day: Optional[Dict[str, Any]] = None,
                        primary_distribution: Optional[str] = None,
+                       train_distribution: Optional[str] = None,
                        verbose: bool = True) -> Dict[str, List[Path]]:
-    """Generate every figure used by the comparison pipeline.
+    """Generate every figure used by the comparison pipeline, organized into
+    `per_distribution/<name>/` and `cross_distribution/` subdirectories.
+
+    Single-distribution figures (01-07) are produced for EVERY entry of the
+    `error_distribution` column in `df`. Figure 08 (representative day) is
+    produced only for the primary distribution. Cross-distribution figures
+    (09-10) are produced once. A top-level INDEX.md is written to guide the
+    reader through the folder structure.
 
     Args:
         df: long-format DataFrame produced by `main.run_annual_comparison()`.
-            May contain an `error_distribution` column with multiple values.
-        out_dir: directory in which to write PDFs and PNGs.
+            Must contain an `error_distribution` column to enable splitting.
+        out_dir: top-level figures directory.
         representative_day: optional dict with 24-hour snapshots for plot 08.
-        primary_distribution: name of the distribution from which to draw the
-            single-distribution plots (01 to 08). Defaults to the first
-            distribution found in `df` if not provided.
+        primary_distribution: distribution selected for plot 08 and the paper
+            "main story" plots. Defaults to the first distribution in `df`.
+        train_distribution: distribution used during PPO training (only for
+            display in INDEX.md).
         verbose: whether to print a summary line at the end.
 
     Returns:
@@ -562,36 +678,61 @@ def generate_all_plots(df: pd.DataFrame,
     """
     apply_style()
     out_dir = Path(out_dir)
+    per_dist_root = out_dir / "per_distribution"
+    cross_root = out_dir / "cross_distribution"
 
-    # Choose the primary distribution for single-distribution plots
     has_dist_col = "error_distribution" in df.columns
     if has_dist_col:
-        if primary_distribution is None or primary_distribution not in df["error_distribution"].unique():
-            primary_distribution = sorted(df["error_distribution"].unique())[0]
-        df_primary = (df[df["error_distribution"] == primary_distribution]
-                      .sort_values("day").reset_index(drop=True))
+        dists = sorted(df["error_distribution"].unique())
     else:
-        df_primary = df.copy()
-        primary_distribution = None
+        dists = ["all"]
 
-    figures = {
-        "cumulative_profit":           plot_cumulative_profit(df_primary, out_dir),
-        "daily_profit_distribution":   plot_daily_profit_distribution(df_primary, out_dir),
-        "revenue_breakdown":           plot_revenue_breakdown(df_primary, out_dir),
-        "profit_difference":           plot_profit_difference(df_primary, out_dir),
-        "execution_time":              plot_execution_time(df_primary, out_dir),
-        "soh_evolution":               plot_soh_evolution(df_primary, out_dir),
-        "profit_scatter":              plot_profit_scatter(df_primary, out_dir),
-        "representative_day":          plot_representative_day(representative_day, out_dir),
-        # Cross-distribution figures (skipped automatically if only one dist)
-        "cross_distribution_boxplot":  plot_cross_distribution_boxplot(df, out_dir),
-        "robustness_summary":          plot_robustness_summary(df, out_dir),
-    }
-    if verbose:
-        n_files = sum(len(v) for v in figures.values())
-        if primary_distribution is not None:
-            print(f"  Saved {n_files} files under {out_dir} "
-                  f"(single-dist plots from '{primary_distribution}')")
+    if primary_distribution is None or primary_distribution not in dists:
+        primary_distribution = dists[0]
+
+    all_files: Dict[str, List[Path]] = {}
+
+    # Per-distribution plots (01-07 for every dist, 08 for the primary only)
+    for d in dists:
+        if has_dist_col:
+            df_d = (df[df["error_distribution"] == d]
+                    .sort_values("day").reset_index(drop=True))
         else:
-            print(f"  Saved {n_files} files under {out_dir}")
-    return figures
+            df_d = df.copy()
+        dist_dir = per_dist_root / d
+        suffix = f"  ({d})" if has_dist_col else ""
+
+        all_files[f"{d}/01_cumulative_profit"] = \
+            plot_cumulative_profit(df_d, dist_dir, title_suffix=suffix)
+        all_files[f"{d}/02_daily_profit_distribution"] = \
+            plot_daily_profit_distribution(df_d, dist_dir, title_suffix=suffix)
+        all_files[f"{d}/03_revenue_breakdown"] = \
+            plot_revenue_breakdown(df_d, dist_dir, title_suffix=suffix)
+        all_files[f"{d}/04_profit_difference"] = \
+            plot_profit_difference(df_d, dist_dir, title_suffix=suffix)
+        all_files[f"{d}/05_execution_time"] = \
+            plot_execution_time(df_d, dist_dir, title_suffix=suffix)
+        all_files[f"{d}/06_soh_evolution"] = \
+            plot_soh_evolution(df_d, dist_dir, title_suffix=suffix)
+        all_files[f"{d}/07_profit_scatter"] = \
+            plot_profit_scatter(df_d, dist_dir, title_suffix=suffix)
+        if d == primary_distribution:
+            all_files[f"{d}/08_representative_day"] = \
+                plot_representative_day(representative_day, dist_dir)
+
+    # Cross-distribution plots (09, 10) on the full DataFrame
+    all_files["09_cross_distribution_boxplot"] = \
+        plot_cross_distribution_boxplot(df, cross_root)
+    all_files["10_robustness_summary"] = \
+        plot_robustness_summary(df, cross_root)
+
+    # Top-level INDEX.md
+    index_path = write_index(out_dir, dists, primary_distribution, train_distribution)
+
+    if verbose:
+        n_files = sum(len(v) for v in all_files.values())
+        print(f"  Saved {n_files} figure files under {out_dir}")
+        print(f"  Per-distribution plots: {per_dist_root}")
+        print(f"  Cross-distribution plots: {cross_root}")
+        print(f"  Index: {index_path}")
+    return all_files
