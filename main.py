@@ -103,11 +103,11 @@ class PipelineConfig:
 
     seed: int = 42
 
-    # PPO training hyperparameters
-    pretrain_timesteps: int = 500_000
-    retrain_timesteps: int = 100_000
+    # PPO training hyperparameters (Fix 3: increased training budget)
+    pretrain_timesteps: int = 1_000_000   # was 500k; price sensitivity needs more samples
+    retrain_timesteps: int = 200_000      # was 100k; same reason
     learning_rate: float = 3e-4
-    ent_coef: float = 0.01
+    ent_coef: float = 0.05         # Fix 1: increased from 0.01 to escape mode collapse
 
     # Battery parameters
     battery_capacity_mwh: float = 4.0
@@ -123,6 +123,8 @@ class PipelineConfig:
 
     # Behavior toggles
     skip_train: bool = False
+    enable_reward_shaping: bool = True   # Fix 2: ON during training, OFF in eval
+    flex_price_error_pct: float = 0.05   # Opt B: forecast error on FCR/aFRR/mFRR tariffs (5% default)
     verbose: bool = True
 
 
@@ -153,13 +155,21 @@ def parse_args() -> PipelineConfig:
              "and the MILP are benchmarked. Pass several space-separated names.",
     )
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--pretrain-timesteps", type=int, default=500_000)
-    p.add_argument("--retrain-timesteps", type=int, default=100_000)
+    p.add_argument("--pretrain-timesteps", type=int, default=1_000_000)
+    p.add_argument("--retrain-timesteps", type=int, default=200_000)
     p.add_argument("--learning-rate", type=float, default=3e-4)
-    p.add_argument("--ent-coef", type=float, default=0.01)
+    p.add_argument("--ent-coef", type=float, default=0.05,
+                   help="PPO entropy coefficient (Fix 1: default 0.05 to avoid mode collapse)")
     p.add_argument("--output-root", default="results")
     p.add_argument("--model-path", default="ppo_models/main_ppo.zip")
     p.add_argument("--skip-train", action="store_true")
+    p.add_argument("--no-reward-shaping", action="store_true",
+                   help="Disable Fix-2 price-sensitivity shaping during training "
+                        "(ablation flag; default ON)")
+    p.add_argument("--flex-price-error", type=float, default=0.05,
+                   help="Half-width of the uniform forecast error on FCR/aFRR/mFRR "
+                        "tariffs (default 0.05 = +/-5%%). Set to 0 to recover the "
+                        "deterministic-flexibility-tariff regime (ablation).")
     p.add_argument("--quiet", action="store_true")
 
     args = p.parse_args()
@@ -178,6 +188,8 @@ def parse_args() -> PipelineConfig:
         output_root=args.output_root,
         model_path=args.model_path,
         skip_train=args.skip_train,
+        enable_reward_shaping=not args.no_reward_shaping,
+        flex_price_error_pct=args.flex_price_error,
         verbose=not args.quiet,
     )
 
@@ -295,7 +307,8 @@ def build_market_data(cfg: PipelineConfig, paths: OutputPaths) -> Dict[str, Any]
         print(f"  Generating {total_hours} hours of synthetic prices ({pretrain_hours} pretrain + {annual_hours} annual)")
 
     prices = generate_synthetic_prices(total_hours, seed=cfg.seed)
-    flex_market = FlexibilityMarket(random_seed=cfg.seed)
+    flex_market = FlexibilityMarket(random_seed=cfg.seed,
+                                    flex_price_error_pct=cfg.flex_price_error_pct)
     services = generate_flexibility_services(total_hours, flex_market)
 
     # Persist prices to CSV for inspection / reproducibility
@@ -326,8 +339,19 @@ def make_env(
     prices: List[float],
     error_distribution: str,
     seed: int,
+    enable_reward_shaping: bool = True,
+    flex_price_error_pct: float = 0.05,
 ) -> ExtendedBatteryTradingEnv:
-    """Construct an ExtendedBatteryTradingEnv with a forecast error generator."""
+    """Construct an ExtendedBatteryTradingEnv with a forecast error generator.
+
+    Args:
+        enable_reward_shaping: if True, the env adds the Fix-2 intrinsic
+            bonus during step() to teach price sensitivity. Set to False at
+            evaluation time so that the realized reward equals the economic
+            net profit (the metric compared to the MILP).
+        flex_price_error_pct: half-width of the uniform forecast error on
+            FCR/aFRR/mFRR tariffs. Default 5%. See FlexibilityMarket docstring.
+    """
     error_gen = ForecastErrorGenerator(error_distribution)
     return ExtendedBatteryTradingEnv(
         prices=prices,
@@ -335,6 +359,8 @@ def make_env(
         flexibility_enabled=True,
         conflict_strategy="equal_priority",  # Fix B: avoid zeroing arbitrage when flex saturates
         random_seed=seed,
+        enable_reward_shaping=enable_reward_shaping,
+        flex_price_error_pct=flex_price_error_pct,
     )
 
 
@@ -353,7 +379,9 @@ def train_ppo(
 
     print(f"  Pretraining PPO for {cfg.pretrain_timesteps:,} timesteps "
           f"(error dist: {cfg.train_error_distribution})...")
-    env = make_env(pretrain_prices, cfg.train_error_distribution, cfg.seed)
+    env = make_env(pretrain_prices, cfg.train_error_distribution, cfg.seed,
+                   enable_reward_shaping=cfg.enable_reward_shaping,
+                   flex_price_error_pct=cfg.flex_price_error_pct)
     vec_env = DummyVecEnv([lambda: env])
 
     model = PPO(
@@ -400,7 +428,9 @@ def retrain_ppo(
         return
 
     print(f"  Monthly retraining for month {month_idx} ({cfg.retrain_timesteps:,} timesteps)...")
-    env = make_env(recent_prices, cfg.train_error_distribution, cfg.seed + month_idx)
+    env = make_env(recent_prices, cfg.train_error_distribution, cfg.seed + month_idx,
+                   enable_reward_shaping=cfg.enable_reward_shaping,
+                   flex_price_error_pct=cfg.flex_price_error_pct)
     vec_env = DummyVecEnv([lambda: env])
     model.set_env(vec_env)
     model.learn(total_timesteps=cfg.retrain_timesteps, reset_num_timesteps=False)
@@ -533,8 +563,13 @@ def run_ppo_day(
     The environment uses `eval_distribution` for forecast-error generation,
     which may differ from the distribution used during training. This is the
     setup that probes the agent's out-of-distribution robustness.
+
+    Reward shaping is DISABLED in evaluation so that the reported reward
+    equals the realized economic profit (consistent with MILP).
     """
-    env = make_env(daily_prices, eval_distribution, cfg.seed)
+    env = make_env(daily_prices, eval_distribution, cfg.seed,
+                   enable_reward_shaping=False,
+                   flex_price_error_pct=cfg.flex_price_error_pct)
     obs, _ = env.reset()
     t0 = time.time()
 
@@ -1098,7 +1133,9 @@ def main() -> int:
     # Build action_space_info from a temporary env (cheap)
     action_space_info = None
     try:
-        tmp_env = make_env([50.0] * 24, cfg.train_error_distribution, cfg.seed)
+        tmp_env = make_env([50.0] * 24, cfg.train_error_distribution, cfg.seed,
+                           enable_reward_shaping=False,
+                           flex_price_error_pct=cfg.flex_price_error_pct)
         action_space_info = {
             "arbitrage_values": list(tmp_env.arbitrage_values),
             "fcr_percentages": list(tmp_env.fcr_percentages),

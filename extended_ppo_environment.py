@@ -47,18 +47,27 @@ class ExtendedBatteryTradingEnv(gym.Env):
     - mFRR: 3 actions (0%, 50%, 100% of available capacity)
     """
     
-    def __init__(self, prices, error_generator, flexibility_enabled=True, conflict_strategy='equal_priority', random_seed=None):
+    def __init__(self, prices, error_generator, flexibility_enabled=True,
+                 conflict_strategy='equal_priority', random_seed=None,
+                 enable_reward_shaping=True, flex_price_error_pct=0.05):
         super(ExtendedBatteryTradingEnv, self).__init__()
 
         # Core components
         self.prices = prices
         self.error_gen = error_generator
         self.battery = Battery()
-        self.flexibility_market = FlexibilityMarket(random_seed=random_seed)
+        self.flexibility_market = FlexibilityMarket(
+            random_seed=random_seed,
+            flex_price_error_pct=flex_price_error_pct,
+        )
         self.flexibility_enabled = flexibility_enabled
 
         # Conflict resolution strategy configuration
         self.conflict_strategy = conflict_strategy  # 'revenue_priority', 'arbitrage_priority', 'equal_priority'
+        # Fix 2: price-sensitivity reward shaping (learning aid; ON during training).
+        # At evaluation/deployment time the realized economic profit (without the
+        # bonus) is what matters; the bonus shapes only the learning gradient.
+        self.enable_reward_shaping = enable_reward_shaping
 
         # Environment state
         self.current_step = 0
@@ -615,10 +624,50 @@ class ExtendedBatteryTradingEnv(gym.Env):
             # Small penalty for not being able to execute desired action
             conflict_penalty = -0.1 * abs(actions['arbitrage'] - original_arbitrage)
 
-        # Total reward: profit + flexibility_revenue - degradation + penalties
-        # Removed artificial FCR bonus - PPO should learn FCR profitability naturally
+        # ====================================================================
+        # Fix 2: PRICE-SENSITIVITY INTRINSIC REWARD (learning aid only)
+        # --------------------------------------------------------------------
+        # The MILP can see the full 24-hour price horizon and arbitrage
+        # optimally; the PPO must learn the price signal from the state. With
+        # an arbitrage profit of ~5 EUR/MWh delta between peak/off-peak hours
+        # and an aFRR capacity payment of ~25 EUR/MW/h dominating the reward,
+        # the PPO has no incentive to learn price sensitivity and converges
+        # to a price-blind policy.
+        #
+        # This term injects an explicit signal that rewards "discharge when
+        # the price is HIGH relative to the daily mean" and "charge when LOW".
+        # It does NOT change the realized economic profit (arbitrage_profit
+        # remains the truth-of-record), it only shapes the learning gradient.
+        # The coefficient is small enough that it does not distort the
+        # asymptotic optimal policy.
+        #
+        # The shaping is disabled at evaluation time via the
+        # `enable_reward_shaping` flag (default True during training).
+        # ====================================================================
+        price_shaping_bonus = 0.0
+        if getattr(self, 'enable_reward_shaping', True) and self.flexibility_enabled:
+            # Look at the daily mean price from the forecast window in the obs
+            # We compute it on the fly from the raw forecast prices accessible
+            # via the environment's internal state.
+            forecast_window = self.prices[self.current_step:
+                                          self.current_step + 24]
+            if len(forecast_window) > 0:
+                daily_mean = float(np.mean(forecast_window))
+                price_deviation = (true_price - daily_mean) / max(daily_mean, 1.0)
+                # arbitrage_energy > 0 = charging (we want this when price < mean)
+                # arbitrage_energy < 0 = discharging (we want this when price > mean)
+                # So the dot product (-energy) * deviation is positive when the
+                # agent is doing the right thing.
+                # Coefficient PRICE_SHAPING_K is small relative to typical
+                # arbitrage_profit so as not to override the real economic signal.
+                PRICE_SHAPING_K = 5.0
+                price_shaping_bonus = (
+                    PRICE_SHAPING_K * (-arbitrage_energy) * price_deviation
+                )
+
+        # Total reward: profit + flexibility_revenue - degradation + penalties + shaping
         reward = (arbitrage_profit + flexibility_revenue - degradation_cost +
-                 soc_penalty + conflict_penalty)
+                 soc_penalty + conflict_penalty + price_shaping_bonus)
 
         # Update step
         self.current_step += 1

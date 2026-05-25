@@ -18,27 +18,47 @@ class ServiceType(Enum):
 
 @dataclass
 class FlexibilityService:
-    """Data model for flexibility service according to Italian regulations"""
+    """Data model for flexibility service according to Italian regulations.
+
+    Two pairs of prices are tracked:
+      - capacity_price / energy_price: the FORECAST values that MILP and PPO
+        observe at decision time. These are noisy (true * (1 + e), with e
+        sampled from the uniform forecast-error distribution defined in the
+        owning FlexibilityMarket).
+      - true_capacity_price / true_energy_price: the actual settlement prices
+        used when computing the realized payment. Equal to the forecast values
+        when `flex_price_error_pct == 0` (deterministic regime).
+    """
     service_type: ServiceType
-    capacity_price: float      # EUR/MW/h - capacity payment
-    energy_price: float        # EUR/MWh - energy payment when activated
+    capacity_price: float      # EUR/MW/h - capacity payment (FORECAST visible to optimizer)
+    energy_price: float        # EUR/MWh  - energy payment when activated (FORECAST)
     activation_probability: float  # [0,1] - probability of activation based on historical data
     response_time: int         # seconds - maximum response time per ARERA
     min_capacity: float        # MW - minimum capacity requirement
     max_duration: int          # hours - maximum service duration
     min_duration: int          # hours - minimum service duration
-    
+    # Realized settlement prices (used to compute realized payment ex-post)
+    true_capacity_price: Optional[float] = None  # EUR/MW/h - true settlement price
+    true_energy_price: Optional[float] = None    # EUR/MWh  - true settlement price
+
     def __post_init__(self):
         """Validate service parameters according to ARERA regulations"""
         if self.service_type == ServiceType.FCR:
-            assert self.response_time <= 30, "FCR response time must be ≤ 30 seconds"
+            assert self.response_time <= 30, "FCR response time must be \u2264 30 seconds"
             assert self.min_capacity >= 1.0, "FCR minimum capacity is 1 MW"
         elif self.service_type == ServiceType.AFRR:
-            assert self.response_time <= 200, "aFRR response time must be ≤ 200 seconds"  
+            assert self.response_time <= 200, "aFRR response time must be \u2264 200 seconds"
             assert self.min_capacity >= 1.0, "aFRR minimum capacity is 1 MW"
         elif self.service_type == ServiceType.MFRR:
-            assert self.response_time <= 900, "mFRR response time must be ≤ 15 minutes"
+            assert self.response_time <= 900, "mFRR response time must be \u2264 15 minutes"
             assert self.min_capacity >= 1.0, "mFRR minimum capacity is 1 MW"
+
+        # If no true price was supplied, default to the forecast value
+        # (deterministic regime, equivalent to the previous behaviour)
+        if self.true_capacity_price is None:
+            self.true_capacity_price = self.capacity_price
+        if self.true_energy_price is None:
+            self.true_energy_price = self.energy_price
 
 
 @dataclass
@@ -47,7 +67,7 @@ class BatteryState:
     soc: float                 # [0,1] - State of Charge
     available_power: float     # MW - currently available power capacity
     reserved_fcr: float        # MW - power reserved for FCR service
-    reserved_afrr: float       # MW - power reserved for aFRR service  
+    reserved_afrr: float       # MW - power reserved for aFRR service
     reserved_mfrr: float       # MW - power reserved for mFRR service
     degradation_cycles: float # cumulative equivalent cycles
 
@@ -57,14 +77,28 @@ class FlexibilityMarket:
     Italian flexibility market model implementing ARERA regulations
     Manages FCR, aFRR, and mFRR services with realistic pricing and constraints
     """
-    
-    def __init__(self, random_seed: Optional[int] = None):
-        """Initialize with ARERA-compliant default parameters"""
+
+    def __init__(self, random_seed: Optional[int] = None,
+                 flex_price_error_pct: float = 0.05):
+        """Initialize with ARERA-compliant default parameters.
+
+        Args:
+            random_seed: seed for deterministic activation sampling.
+            flex_price_error_pct: half-width of the uniform forecast error on
+                flexibility tariffs (capacity and energy). Default 5%. The forecast
+                that is visible to MILP/PPO at decision time is true_price * (1 + e)
+                with e ~ U[-flex_price_error_pct, +flex_price_error_pct]. The
+                realized payment uses the TRUE price. Set to 0.0 to disable the
+                stochastic flexibility-price model (e.g. for ablation studies).
+        """
         # Set random seed for deterministic behavior
         self.random_seed = random_seed
         if random_seed is not None:
             np.random.seed(random_seed)
-        
+
+        # Forecast-error bound for flexibility tariffs (see docstring)
+        self.flex_price_error_pct = float(flex_price_error_pct)
+
         # ====================================================================
         # CALIBRATED ARERA tariff structure (EUR/MW/h for capacity, EUR/MWh for energy)
         #
@@ -126,7 +160,7 @@ class FlexibilityMarket:
             ServiceType.AFRR: 0.30,   # aFRR: most-activated service in Italy due to renewable integration
             ServiceType.MFRR: 0.20,   # mFRR: activated less than aFRR; matches Terna 2022-2023 statistics
         }
-        
+
         # Seasonal and hourly multipliers for realistic pricing
         self.price_multipliers = {
             'peak_hours': [7, 8, 9, 18, 19, 20, 21],  # Peak demand hours
@@ -134,89 +168,108 @@ class FlexibilityMarket:
             'off_peak_multiplier': 0.8,
             'weekend_multiplier': 0.9,
         }
-    
+
     def get_flexibility_opportunities(self, hour: int, day_of_week: int = 1) -> List[FlexibilityService]:
         """
         Get available flexibility service opportunities for given hour
-        
+
         Args:
             hour: Hour of day (0-23)
             day_of_week: Day of week (0=Monday, 6=Sunday)
-            
+
         Returns:
             List of available FlexibilityService objects
         """
         opportunities = []
-        
+
         # Determine pricing multipliers
         is_peak = hour in self.price_multipliers['peak_hours']
         is_weekend = day_of_week >= 5
-        
+
         multiplier = 1.0
         if is_peak:
             multiplier *= self.price_multipliers['peak_multiplier']
         else:
             multiplier *= self.price_multipliers['off_peak_multiplier']
-            
+
         if is_weekend:
             multiplier *= self.price_multipliers['weekend_multiplier']
-        
+
         # Add deterministic variation based on hour and day to simulate market conditions
         # This replaces the random variation to ensure reproducibility
         variation_seed = (hour * 7 + day_of_week) % 100
         price_variation = 0.9 + (variation_seed / 100.0) * 0.2  # Maps to [0.9, 1.1]
         final_multiplier = multiplier * price_variation
-        
+
         # Create service opportunities for each type
         for service_type in ServiceType:
             tariff = self.arera_tariffs[service_type]
-            
+
+            # True settlement prices: deterministic from the hour/day multipliers
+            true_capacity = tariff['capacity_base'] * final_multiplier
+            true_energy = tariff['energy_base'] * final_multiplier
+
+            # Forecast prices visible to the optimizer at decision time: noisy
+            # with a uniform error of half-width flex_price_error_pct around the
+            # true value. INDEPENDENT samples for capacity and energy.
+            if self.flex_price_error_pct > 0.0:
+                e_cap = np.random.uniform(-self.flex_price_error_pct,
+                                          +self.flex_price_error_pct)
+                e_en = np.random.uniform(-self.flex_price_error_pct,
+                                         +self.flex_price_error_pct)
+                fc_capacity = true_capacity * (1.0 + e_cap)
+                fc_energy = true_energy * (1.0 + e_en)
+            else:
+                fc_capacity = true_capacity
+                fc_energy = true_energy
+
             service = FlexibilityService(
                 service_type=service_type,
-                capacity_price=tariff['capacity_base'] * final_multiplier,
-                energy_price=tariff['energy_base'] * final_multiplier,
+                capacity_price=fc_capacity,        # FORECAST (visible to optimizer)
+                energy_price=fc_energy,            # FORECAST (visible to optimizer)
                 activation_probability=self.historical_probabilities[service_type],
                 response_time=tariff['response_time'],
                 min_capacity=tariff['min_capacity'],
                 max_duration=tariff['max_duration'],
-                min_duration=tariff['min_duration']
+                min_duration=tariff['min_duration'],
+                true_capacity_price=true_capacity,  # TRUE settlement price
+                true_energy_price=true_energy,      # TRUE settlement price
             )
-            
+
             opportunities.append(service)
-        
+
         return opportunities
-    
+
     def calculate_capacity_revenue(self, service: FlexibilityService, capacity_mw: float) -> float:
         """
-        Calculate capacity revenue for providing flexibility service
-        
-        Args:
-            service: FlexibilityService object
-            capacity_mw: Capacity provided in MW
-            
-        Returns:
-            Revenue in EUR/h
+        Calculate capacity revenue for providing flexibility service.
+
+        Uses the TRUE settlement capacity price (post-clearing reality).
+        The forecast price visible to the optimizer (service.capacity_price)
+        is what informed the decision to reserve, but the payment is
+        calculated against service.true_capacity_price.
         """
         if capacity_mw < service.min_capacity:
             return 0.0
-            
-        return service.capacity_price * capacity_mw
-    
+
+        true_price = service.true_capacity_price
+        if true_price is None:  # backward compatibility
+            true_price = service.capacity_price
+        return true_price * capacity_mw
+
     def calculate_activation_revenue(self, service: FlexibilityService, energy_mwh: float) -> float:
         """
-        Calculate energy revenue when flexibility service is activated
-        
-        Args:
-            service: FlexibilityService object  
-            energy_mwh: Energy provided in MWh
-            
-        Returns:
-            Revenue in EUR
+        Calculate energy revenue when flexibility service is activated.
+
+        Uses the TRUE settlement energy price.
         """
         if energy_mwh <= 0:
             return 0.0
-            
-        return service.energy_price * energy_mwh
+
+        true_price = service.true_energy_price
+        if true_price is None:  # backward compatibility
+            true_price = service.energy_price
+        return true_price * energy_mwh
     
     def check_service_constraints(self, service: FlexibilityService, bess_state: BatteryState) -> bool:
         """
