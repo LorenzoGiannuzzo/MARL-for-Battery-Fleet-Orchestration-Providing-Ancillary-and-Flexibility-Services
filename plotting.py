@@ -537,6 +537,195 @@ def plot_robustness_summary(df: pd.DataFrame, out_dir: Path) -> List[Path]:
     return save_figure(fig, out_dir, "10_robustness_summary")
 
 
+def plot_action_distribution(actions_log: List[List[int]],
+                             arbitrage_values: List[float],
+                             fcr_pct: List[float],
+                             afrr_pct: List[float],
+                             mfrr_pct: List[float],
+                             out_dir: Path,
+                             title_suffix: str = "") -> List[Path]:
+    """4-panel histogram of PPO action choices per category (arbitrage, FCR,
+    aFRR, mFRR). A monotone policy is immediately visible as one tall bar.
+    """
+    if not actions_log:
+        return []
+    arr = np.asarray(actions_log, dtype=int)
+    if arr.ndim != 2 or arr.shape[1] != 4:
+        return []
+
+    fig, axes = plt.subplots(1, 4, figsize=(FIG_WIDTH_DOUBLE, 2.8))
+    cats = [
+        ("Arbitrage (MW)",
+         arr[:, 0],
+         [f"{v:+.1f}" for v in arbitrage_values],
+         COLORS["arbitrage"]),
+        ("FCR reservation",
+         arr[:, 1],
+         [f"{int(p*100)}%" for p in fcr_pct],
+         COLORS["FCR"]),
+        ("aFRR reservation",
+         arr[:, 2],
+         [f"{int(p*100)}%" for p in afrr_pct],
+         COLORS["aFRR"]),
+        ("mFRR reservation",
+         arr[:, 3],
+         [f"{int(p*100)}%" for p in mfrr_pct],
+         COLORS["mFRR"]),
+    ]
+    for ax, (title, vals, labels, color) in zip(axes, cats):
+        bins = np.arange(len(labels) + 1) - 0.5
+        ax.hist(vals, bins=bins, color=color, alpha=0.8,
+                edgecolor="white", linewidth=0.5)
+        # Tick labels: for the dense arbitrage axis, show every 4th tick
+        if len(labels) > 8:
+            step = max(1, len(labels) // 5)
+            tick_idx = list(range(0, len(labels), step))
+            ax.set_xticks(tick_idx)
+            ax.set_xticklabels([labels[i] for i in tick_idx], fontsize=7)
+        else:
+            ax.set_xticks(range(len(labels)))
+            ax.set_xticklabels(labels, fontsize=8)
+        ax.set_title(title, fontsize=9)
+        ax.set_ylabel("Hours" if ax is axes[0] else "")
+        ax.grid(axis="y", alpha=0.25)
+    fig.suptitle(f"PPO action distribution{title_suffix}",
+                 fontsize=10, y=1.02)
+    fig.tight_layout()
+    return save_figure(fig, out_dir, "11_action_distribution")
+
+
+def plot_soc_comparison_day(rep_day: Dict[str, Any], out_dir: Path,
+                            title_suffix: str = "") -> List[Path]:
+    """SOC trajectory comparison MILP vs PPO on the representative day.
+    Shows whether PPO actually moves the battery or keeps it flat.
+    """
+    if not rep_day:
+        return []
+    milp_soc = np.asarray(rep_day.get("milp_soc", []), dtype=float)
+    ppo_soc = np.asarray(rep_day.get("ppo_soc", []), dtype=float)
+    if milp_soc.size == 0 or ppo_soc.size == 0:
+        return []
+    hours_m = np.arange(len(milp_soc))
+    hours_p = np.arange(len(ppo_soc))
+
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH_DOUBLE, 3.0))
+    ax.plot(hours_m, milp_soc * 100, color=COLORS["MILP"],
+            linewidth=1.6, marker="o", markersize=3, label="MILP")
+    ax.plot(hours_p, ppo_soc * 100, color=COLORS["PPO"],
+            linewidth=1.6, marker="s", markersize=3, label="PPO")
+    ax.axhline(10.0, color=COLORS["reference"], linestyle=":", linewidth=0.7)
+    ax.axhline(90.0, color=COLORS["reference"], linestyle=":", linewidth=0.7)
+    ax.set_xlabel("Hour of day")
+    ax.set_ylabel("SOC (%)")
+    ax.set_ylim(0, 100)
+    ax.set_title(f"SOC trajectory: MILP vs PPO (day {rep_day.get('day', '?')}"
+                 f"{title_suffix})")
+    ax.legend(loc="best")
+    # Annotate the SOC range for each algorithm
+    milp_range = (milp_soc.max() - milp_soc.min()) * 100
+    ppo_range = (ppo_soc.max() - ppo_soc.min()) * 100
+    ax.text(0.02, 0.95,
+            f"MILP SOC range: {milp_range:.1f}%\nPPO SOC range:  {ppo_range:.1f}%",
+            transform=ax.transAxes, va="top", ha="left", fontsize=8,
+            bbox=dict(facecolor="white", alpha=0.85, edgecolor="none"))
+    fig.tight_layout()
+    return save_figure(fig, out_dir, "12_soc_comparison_day")
+
+
+def plot_reservation_heatmap(reservations_all_days: List[Dict[str, List[float]]],
+                             algorithm_name: str,
+                             out_dir: Path,
+                             title_suffix: str = "") -> List[Path]:
+    """365 x 24 heatmap of the total flexibility power reservation (sum of
+    FCR+aFRR+mFRR) per hour and per day. One figure per algorithm.
+    """
+    if not reservations_all_days:
+        return []
+    n_days = len(reservations_all_days)
+    n_hours = 24
+    mat = np.zeros((n_days, n_hours), dtype=float)
+    for d, rsv in enumerate(reservations_all_days):
+        if not rsv:
+            continue
+        fcr = rsv.get("FCR", [0.0] * n_hours)
+        afrr = rsv.get("aFRR", [0.0] * n_hours)
+        mfrr = rsv.get("mFRR", [0.0] * n_hours)
+        for h in range(min(n_hours, len(fcr))):
+            mat[d, h] = float(fcr[h]) + float(afrr[h]) + float(mfrr[h])
+
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH_DOUBLE, 3.5))
+    im = ax.imshow(mat.T, aspect="auto", cmap="YlOrRd",
+                   origin="lower", vmin=0, vmax=2.0)
+    ax.set_xlabel("Day of year")
+    ax.set_ylabel("Hour of day")
+    ax.set_yticks(range(0, 24, 4))
+    ax.set_title(f"{algorithm_name}: total flexibility reservation (MW)"
+                 f"{title_suffix}")
+    cbar = fig.colorbar(im, ax=ax, shrink=0.85, pad=0.02)
+    cbar.set_label("Total reserved (MW)", fontsize=8)
+    fig.tight_layout()
+    fname = f"13_reservation_heatmap_{algorithm_name.lower()}"
+    return save_figure(fig, out_dir, fname)
+
+
+def plot_revenue_per_throughput(df: pd.DataFrame, out_dir: Path,
+                                title_suffix: str = "") -> List[Path]:
+    """Annual revenue / annual throughput for both algorithms.
+    Reveals if an algorithm earns money without moving the battery.
+    """
+    # Use the last-day values which are cumulative
+    last = df.iloc[-1] if "milp_cumulative" in df.columns else None
+    if last is None:
+        return []
+    milp_rev = float(last["milp_cumulative"])
+    ppo_rev = float(last["ppo_cumulative"])
+    milp_th = float(last["milp_throughput_cum"])
+    ppo_th = float(last.get("ppo_total_throughput",
+                            last.get("ppo_throughput_cum", 0.0)))
+    if ppo_th < 0.01:
+        # If PPO total throughput column isn't there, fall back to the cumulative
+        # arbitrage throughput; either way show "infinity / no movement" if zero.
+        ppo_th_eff = max(ppo_th, 1e-6)
+    else:
+        ppo_th_eff = ppo_th
+    milp_th_eff = max(milp_th, 1e-6)
+
+    fig, axes = plt.subplots(1, 2, figsize=(FIG_WIDTH_DOUBLE, 3.0))
+
+    # Left: bars of revenue and throughput
+    ax = axes[0]
+    x = np.arange(2)
+    width = 0.35
+    rev_vals = np.array([milp_rev, ppo_rev]) / 1000.0
+    th_vals = np.array([milp_th, ppo_th])
+    ax2 = ax.twinx()
+    ax.bar(x - width/2, rev_vals, width=width,
+           color=[COLORS["MILP"], COLORS["PPO"]], alpha=0.7, label="Revenue")
+    ax2.bar(x + width/2, th_vals, width=width,
+            color=[COLORS["MILP"], COLORS["PPO"]], alpha=0.35, hatch="///",
+            label="Throughput")
+    ax.set_xticks(x)
+    ax.set_xticklabels(["MILP", "PPO"])
+    ax.set_ylabel("Annual revenue (k\u20ac)")
+    ax2.set_ylabel("Annual throughput (MWh)")
+    ax.set_title(f"Annual revenue and throughput{title_suffix}")
+
+    # Right: revenue per MWh of throughput
+    ax = axes[1]
+    eff_vals = np.array([milp_rev / milp_th_eff, ppo_rev / ppo_th_eff])
+    ax.bar(["MILP", "PPO"], eff_vals,
+           color=[COLORS["MILP"], COLORS["PPO"]], alpha=0.85,
+           edgecolor="white", linewidth=0.5)
+    for i, v in enumerate(eff_vals):
+        label = f"{v:.0f}" if np.isfinite(v) and v < 1e5 else "very high"
+        ax.text(i, v, f"  {label}", ha="center", va="bottom", fontsize=8)
+    ax.set_ylabel("Revenue per MWh of throughput (\u20ac/MWh)")
+    ax.set_title("Economic efficiency")
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    return save_figure(fig, out_dir, "14_revenue_per_throughput")
+
+
 # ---------------------------------------------------------------------------
 # Master function
 # ---------------------------------------------------------------------------
@@ -652,6 +841,8 @@ def generate_all_plots(df: pd.DataFrame,
                        representative_day: Optional[Dict[str, Any]] = None,
                        primary_distribution: Optional[str] = None,
                        train_distribution: Optional[str] = None,
+                       diagnostics: Optional[Dict[str, Any]] = None,
+                       action_space_info: Optional[Dict[str, Any]] = None,
                        verbose: bool = True) -> Dict[str, List[Path]]:
     """Generate every figure used by the comparison pipeline, organized into
     `per_distribution/<name>/` and `cross_distribution/` subdirectories.
@@ -659,22 +850,9 @@ def generate_all_plots(df: pd.DataFrame,
     Single-distribution figures (01-07) are produced for EVERY entry of the
     `error_distribution` column in `df`. Figure 08 (representative day) is
     produced only for the primary distribution. Cross-distribution figures
-    (09-10) are produced once. A top-level INDEX.md is written to guide the
-    reader through the folder structure.
-
-    Args:
-        df: long-format DataFrame produced by `main.run_annual_comparison()`.
-            Must contain an `error_distribution` column to enable splitting.
-        out_dir: top-level figures directory.
-        representative_day: optional dict with 24-hour snapshots for plot 08.
-        primary_distribution: distribution selected for plot 08 and the paper
-            "main story" plots. Defaults to the first distribution in `df`.
-        train_distribution: distribution used during PPO training (only for
-            display in INDEX.md).
-        verbose: whether to print a summary line at the end.
-
-    Returns:
-        Mapping figure-name -> list of file paths.
+    (09-10) are produced once. Diagnostic figures (11-14) are produced only
+    for the primary distribution and require `diagnostics` and
+    `action_space_info` to be supplied by the main pipeline.
     """
     apply_style()
     out_dir = Path(out_dir)
@@ -719,6 +897,36 @@ def generate_all_plots(df: pd.DataFrame,
         if d == primary_distribution:
             all_files[f"{d}/08_representative_day"] = \
                 plot_representative_day(representative_day, dist_dir)
+
+            # Diagnostic plots 11-14 only for the primary distribution
+            if diagnostics is not None and action_space_info is not None:
+                # 11: action distribution
+                actions = diagnostics.get("ppo_actions_all_days", [])
+                all_files[f"{d}/11_action_distribution"] = \
+                    plot_action_distribution(
+                        actions,
+                        action_space_info.get("arbitrage_values", []),
+                        action_space_info.get("fcr_percentages", []),
+                        action_space_info.get("afrr_percentages", []),
+                        action_space_info.get("mfrr_percentages", []),
+                        dist_dir, title_suffix=suffix)
+                # 12: SOC comparison on the representative day
+                all_files[f"{d}/12_soc_comparison_day"] = \
+                    plot_soc_comparison_day(representative_day or {},
+                                            dist_dir, title_suffix=suffix)
+                # 13: hourly reservation heatmaps (one per algorithm)
+                milp_rsv = diagnostics.get("milp_flex_reservations_all_days", [])
+                ppo_rsv  = diagnostics.get("ppo_flex_reservations_all_days", [])
+                files_milp = plot_reservation_heatmap(milp_rsv, "MILP",
+                                                      dist_dir, title_suffix=suffix)
+                files_ppo  = plot_reservation_heatmap(ppo_rsv, "PPO",
+                                                     dist_dir, title_suffix=suffix)
+                all_files[f"{d}/13_reservation_heatmap_milp"] = files_milp
+                all_files[f"{d}/13_reservation_heatmap_ppo"] = files_ppo
+                # 14: revenue per throughput
+                all_files[f"{d}/14_revenue_per_throughput"] = \
+                    plot_revenue_per_throughput(df_d, dist_dir,
+                                                title_suffix=suffix)
 
     # Cross-distribution plots (09, 10) on the full DataFrame
     all_files["09_cross_distribution_boxplot"] = \

@@ -333,7 +333,7 @@ def make_env(
         prices=prices,
         error_generator=error_gen,
         flexibility_enabled=True,
-        conflict_strategy="revenue_priority",
+        conflict_strategy="equal_priority",  # Fix B: avoid zeroing arbitrage when flex saturates
         random_seed=seed,
     )
 
@@ -543,6 +543,11 @@ def run_ppo_day(
     soc_traj = [env.battery.soc]
     power_traj: List[float] = []
     flex_res = {"FCR": [], "aFRR": [], "mFRR": []}
+    # Fix A tracking: separate arbitrage / activation throughput
+    activation_throughput_total = 0.0
+    arbitrage_throughput_total = 0.0
+    # Diagnostic tracking: action distribution
+    actions_log: List[List[int]] = []
 
     for _ in range(len(daily_prices)):
         if ppo_model is not None:
@@ -561,6 +566,9 @@ def run_ppo_day(
         total_arb += info.get("arbitrage_profit", 0.0)
         total_flex += info.get("flexibility_revenue", 0.0)
         total_deg += info.get("degradation_cost", 0.0)
+        arbitrage_throughput_total += info.get("arbitrage_throughput_mwh", 0.0)
+        activation_throughput_total += info.get("activation_throughput_mwh", 0.0)
+        actions_log.append(info.get("action_raw", [10, 0, 0, 0]))
         breakdown = info.get("flexibility_breakdown", {})
         fcr_rev += breakdown.get("fcr_revenue", 0.0)
         afrr_rev += breakdown.get("afrr_revenue", 0.0)
@@ -591,6 +599,11 @@ def run_ppo_day(
         "soc_trajectory": soc_traj,
         "power_trajectory": power_traj,
         "flexibility_reservations": flex_res,
+        # New tracking (Fix A + diagnostics)
+        "arbitrage_throughput_mwh": arbitrage_throughput_total,
+        "activation_throughput_mwh": activation_throughput_total,
+        "total_throughput_mwh": arbitrage_throughput_total + activation_throughput_total,
+        "actions_log": actions_log,
     }
 
 
@@ -754,6 +767,10 @@ def run_annual_comparison(
                     "ppo_cumulative": ppo_cum,
                     "milp_throughput_cum": milp_th,
                     "ppo_throughput_cum": ppo_th,
+                    # New tracking from Fix A
+                    "ppo_arbitrage_throughput": ppo_res.get("arbitrage_throughput_mwh", 0.0),
+                    "ppo_activation_throughput": ppo_res.get("activation_throughput_mwh", 0.0),
+                    "ppo_total_throughput": ppo_res.get("total_throughput_mwh", 0.0),
                 }
             )
 
@@ -768,6 +785,9 @@ def run_annual_comparison(
                         "milp_power": list(milp_res["power_trajectory"]),
                         "ppo_soc": list(ppo_res["soc_trajectory"]),
                         "ppo_power": list(ppo_res["power_trajectory"]),
+                        "ppo_actions": ppo_res.get("actions_log", []),
+                        "milp_flex_reservations": milp_res.get("flexibility_reservations", {}),
+                        "ppo_flex_reservations": ppo_res.get("flexibility_reservations", {}),
                     }
                 )
 
@@ -785,8 +805,34 @@ def run_annual_comparison(
         vols = np.array([s["volatility"] for s in primary_snapshots])
         med_idx = int(np.argmin(np.abs(vols - np.median(vols))))
         rep_day = primary_snapshots[med_idx]
-        with open(paths.comparison / "representative_day.json", "w") as f:
-            json.dump(rep_day, f, indent=2, default=str)
+        # Don't serialize the heavy action / reservation arrays inside the rep_day JSON
+        rep_day_light = {k: v for k, v in rep_day.items()
+                         if k not in ("ppo_actions", "milp_flex_reservations",
+                                      "ppo_flex_reservations")}
+        with open(paths.comparison / "representative_day.json", "w",
+                  encoding="utf-8") as f:
+            json.dump(rep_day_light, f, indent=2, default=str)
+
+        # Save full diagnostics (action distribution + hourly reservations across
+        # the whole primary distribution) for the diagnostic plots 11-14
+        diagnostics = {
+            "primary_distribution": primary_dist,
+            "ppo_actions_all_days": [
+                act for snap in primary_snapshots for act in snap.get("ppo_actions", [])
+            ],
+            "milp_flex_reservations_all_days": [
+                snap.get("milp_flex_reservations", {}) for snap in primary_snapshots
+            ],
+            "ppo_flex_reservations_all_days": [
+                snap.get("ppo_flex_reservations", {}) for snap in primary_snapshots
+            ],
+            "milp_soc_all_days": [snap.get("milp_soc", []) for snap in primary_snapshots],
+            "ppo_soc_all_days":  [snap.get("ppo_soc", [])  for snap in primary_snapshots],
+            "milp_power_all_days": [snap.get("milp_power", []) for snap in primary_snapshots],
+            "ppo_power_all_days":  [snap.get("ppo_power", [])  for snap in primary_snapshots],
+        }
+        with open(paths.comparison / "diagnostics.json", "w", encoding="utf-8") as f:
+            json.dump(diagnostics, f, default=str)
     else:
         rep_day = None
 
@@ -1038,10 +1084,36 @@ def main() -> int:
     primary = (cfg.train_error_distribution
                if cfg.train_error_distribution in cfg.eval_error_distributions
                else cfg.eval_error_distributions[0])
+
+    # Load diagnostics that the comparison loop has saved
+    diagnostics = None
+    diag_path = paths.comparison / "diagnostics.json"
+    if diag_path.exists():
+        try:
+            with open(diag_path, "r", encoding="utf-8") as f:
+                diagnostics = json.load(f)
+        except Exception as e:
+            print(f"  WARNING: could not load diagnostics.json ({e})")
+
+    # Build action_space_info from a temporary env (cheap)
+    action_space_info = None
+    try:
+        tmp_env = make_env([50.0] * 24, cfg.train_error_distribution, cfg.seed)
+        action_space_info = {
+            "arbitrage_values": list(tmp_env.arbitrage_values),
+            "fcr_percentages": list(tmp_env.fcr_percentages),
+            "afrr_percentages": list(tmp_env.afrr_percentages),
+            "mfrr_percentages": list(tmp_env.mfrr_percentages),
+        }
+    except Exception as e:
+        print(f"  WARNING: could not build action_space_info ({e})")
+
     generate_all_plots(df, paths.figures,
                        representative_day=rep_day,
                        primary_distribution=primary,
                        train_distribution=cfg.train_error_distribution,
+                       diagnostics=diagnostics,
+                       action_space_info=action_space_info,
                        verbose=cfg.verbose)
 
     print(f"\nAll outputs saved under: {paths.root.resolve()}")

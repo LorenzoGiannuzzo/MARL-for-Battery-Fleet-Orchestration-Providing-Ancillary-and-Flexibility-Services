@@ -47,25 +47,25 @@ class ExtendedBatteryTradingEnv(gym.Env):
     - mFRR: 3 actions (0%, 50%, 100% of available capacity)
     """
     
-    def __init__(self, prices, error_generator, flexibility_enabled=True, conflict_strategy='revenue_priority', random_seed=None):
+    def __init__(self, prices, error_generator, flexibility_enabled=True, conflict_strategy='equal_priority', random_seed=None):
         super(ExtendedBatteryTradingEnv, self).__init__()
-        
+
         # Core components
         self.prices = prices
         self.error_gen = error_generator
         self.battery = Battery()
         self.flexibility_market = FlexibilityMarket(random_seed=random_seed)
         self.flexibility_enabled = flexibility_enabled
-        
+
         # Conflict resolution strategy configuration
         self.conflict_strategy = conflict_strategy  # 'revenue_priority', 'arbitrage_priority', 'equal_priority'
-        
+
         # Environment state
         self.current_step = 0
         self.max_steps = len(prices)
         self.forecast_horizon = FORECAST_HORIZON
         self.episode_length = 480
-        
+
         # ====== ACTION SPACE: MultiDiscrete([21, 4, 3, 3]) ======
         # The action is a vector of FOUR independent components, one per
         # category, so the agent can combine arbitrage and all three
@@ -81,8 +81,8 @@ class ExtendedBatteryTradingEnv(gym.Env):
         # power via the existing conflict-resolution machinery (see step()).
         self.n_arbitrage_actions = 21
         self.n_fcr_actions = 4   # 0%, 25%, 50%, 75%
-        self.n_afrr_actions = 3  # 0%, 50%, 100%
-        self.n_mfrr_actions = 3  # 0%, 50%, 100%
+        self.n_afrr_actions = 4  # Fix C: 0%, 50%, 75%, 90% (no 100% saturation)
+        self.n_mfrr_actions = 4  # Fix C: 0%, 50%, 75%, 90% (no 100% saturation)
 
         self.action_space = spaces.MultiDiscrete([
             self.n_arbitrage_actions,
@@ -100,9 +100,14 @@ class ExtendedBatteryTradingEnv(gym.Env):
                                             self.n_arbitrage_actions)
 
         # Flexibility reservation fractions
+        # Fix C: aFRR/mFRR upper bound reduced from 100% to 90% so that the
+        # agent always leaves at least 10% of the battery's nominal power
+        # available for arbitrage. This prevents the degenerate policy in
+        # which 100% aFRR is reserved and arbitrage is forcibly zeroed by
+        # conflict resolution.
         self.fcr_percentages = [0.0, 0.25, 0.50, 0.75]
-        self.afrr_percentages = [0.0, 0.50, 1.0]
-        self.mfrr_percentages = [0.0, 0.50, 1.0]
+        self.afrr_percentages = [0.0, 0.50, 0.75, 0.90]
+        self.mfrr_percentages = [0.0, 0.50, 0.75, 0.90]
 
         # Observation space: 35 features (26 original + 9 flexibility)
         n_features = 1 + FORECAST_HORIZON + 1 + 9  # SOC + forecast + current + flexibility
@@ -306,7 +311,8 @@ class ExtendedBatteryTradingEnv(gym.Env):
                 'afrr_revenue': 0.0,
                 'mfrr_revenue': 0.0,
                 'capacity_revenue': 0.0,
-                'energy_revenue': 0.0
+                'energy_revenue': 0.0,
+                'activation_throughput_mwh': 0.0,
             }
 
         # Get actual services for revenue calculation
@@ -323,7 +329,8 @@ class ExtendedBatteryTradingEnv(gym.Env):
             'afrr_revenue': 0.0,
             'mfrr_revenue': 0.0,
             'capacity_revenue': 0.0,
-            'energy_revenue': 0.0
+            'energy_revenue': 0.0,
+            'activation_throughput_mwh': 0.0,  # MWh delivered for flex activation (Fix A)
         }
 
         # Calculate revenue for each reserved service
@@ -354,6 +361,13 @@ class ExtendedBatteryTradingEnv(gym.Env):
                 revenue_breakdown['capacity_revenue'] += capacity_revenue
                 revenue_breakdown['energy_revenue'] += activation_result['energy_revenue']
                 revenue_breakdown['total_revenue'] += service_total
+                # BUG FIX (Fix A): track activation throughput so it can be charged
+                # against degradation, consistent with the MILP formulation.
+                # energy_provided is in MWh delivered by the battery this hour.
+                revenue_breakdown['activation_throughput_mwh'] = (
+                    revenue_breakdown.get('activation_throughput_mwh', 0.0)
+                    + activation_result.get('energy_provided', 0.0)
+                )
 
         return revenue_breakdown
 
@@ -572,7 +586,16 @@ class ExtendedBatteryTradingEnv(gym.Env):
         flexibility_revenue = flexibility_revenue_breakdown['total_revenue']
 
         # Calculate degradation cost
-        total_energy_used = abs(arbitrage_energy)
+        # BUG FIX (Fix A): degradation must amortize ALL battery throughput, not just
+        # the arbitrage component. When a flexibility service is activated, the
+        # battery delivers real energy and physically degrades. We now include the
+        # activation throughput so that the PPO sees the same degradation formula
+        # as the MILP and cannot 'free-ride' on flexibility services that ostensibly
+        # do not move the battery.
+        arbitrage_throughput = abs(arbitrage_energy)
+        activation_throughput = flexibility_revenue_breakdown.get(
+            'activation_throughput_mwh', 0.0)
+        total_energy_used = arbitrage_throughput + activation_throughput
         degradation_cost = total_energy_used * DEGRADATION_COST_PER_MWH / (2 * 6000)
 
         # SOC violation penalty
@@ -591,24 +614,24 @@ class ExtendedBatteryTradingEnv(gym.Env):
         if abs(actions['arbitrage'] - original_arbitrage) > 0.01:  # Action was modified
             # Small penalty for not being able to execute desired action
             conflict_penalty = -0.1 * abs(actions['arbitrage'] - original_arbitrage)
-        
+
         # Total reward: profit + flexibility_revenue - degradation + penalties
         # Removed artificial FCR bonus - PPO should learn FCR profitability naturally
-        reward = (arbitrage_profit + flexibility_revenue - degradation_cost + 
+        reward = (arbitrage_profit + flexibility_revenue - degradation_cost +
                  soc_penalty + conflict_penalty)
-        
+
         # Update step
         self.current_step += 1
         done = self.current_step >= min(self.max_steps, self.episode_length)
         truncated = False
-        
+
         # Get next observation
         if done:
-            obs = (self._get_observation() if self.current_step < self.max_steps 
+            obs = (self._get_observation() if self.current_step < self.max_steps
                   else np.zeros(35, dtype=np.float32))
         else:
             obs = self._get_observation()
-        
+
         # Enhanced info dictionary with complete reward breakdown
         info = {
             'arbitrage_energy': arbitrage_energy,
@@ -616,6 +639,9 @@ class ExtendedBatteryTradingEnv(gym.Env):
             'flexibility_revenue': flexibility_revenue,
             'flexibility_breakdown': flexibility_revenue_breakdown,
             'degradation_cost': degradation_cost,
+            'arbitrage_throughput_mwh': arbitrage_throughput,
+            'activation_throughput_mwh': activation_throughput,
+            'total_throughput_mwh': total_energy_used,
             'soc_penalty': soc_penalty,
             'conflict_penalty': conflict_penalty,
             'total_reward': reward,
@@ -625,6 +651,8 @@ class ExtendedBatteryTradingEnv(gym.Env):
             'reserved_mfrr': self.reserved_mfrr,
             'price': true_price,
             'actions_executed': actions,
+            'action_raw': np.asarray(action).flatten().astype(int).tolist()
+                          if np.ndim(action) > 0 else [int(action)],
             'power_utilization': (abs(actions['arbitrage']) + self.reserved_fcr + 
                                 self.reserved_afrr + self.reserved_mfrr) / available_power
         }
