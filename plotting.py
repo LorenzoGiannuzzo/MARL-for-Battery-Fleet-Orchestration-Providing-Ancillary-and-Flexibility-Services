@@ -643,7 +643,7 @@ def write_index(out_dir: Path,
     md.append("- Supplementary: everything else.")
 
     path = out_dir / "INDEX.md"
-    path.write_text("\n".join(md))
+    path.write_text("\n".join(md), encoding="utf-8")
     return path
 
 
