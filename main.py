@@ -801,6 +801,13 @@ def run_milp_day(
         "soc_trajectory": result.soc_trajectory,
         "power_trajectory": result.power_trajectory,
         "flexibility_reservations": result.flexibility_reservations,
+        # Throughput reporting fix (May 2026): the MILP `power_trajectory`
+        # only contains the arbitrage component (P_discharge - P_charge),
+        # so summing |power_trajectory| under-counts the total cycling by
+        # exactly the activation MWh from FCR/aFRR/mFRR. We expose the
+        # activations explicitly so run_annual_comparison can aggregate
+        # the full throughput symmetrically with the PPO side.
+        "flexibility_activations": result.flexibility_activations,
     }
 
 
@@ -1031,21 +1038,25 @@ def run_annual_comparison(
             # ----------------------------------------------------------------
             # Throughput accounting fix
             # ----------------------------------------------------------------
-            # The MILP `power_trajectory` returned by the optimizer is the
-            # full planned battery power (signed: P_discharge - P_charge),
-            # so sum(|p|) already captures arbitrage + flexibility activation.
-            # The PPO `power_trajectory`, in contrast, is built in
-            # run_ppo_day() from info['arbitrage_energy'] alone and does NOT
-            # include activation throughput. Comparing sum(|p|) directly
-            # under-counts the PPO side by exactly the activation MWh and
-            # made the previous reports look like "PPO cycles 0 MWh while
-            # MILP cycles 550 MWh", which is misleading: most of the gap
-            # was activation that the PPO did execute but did not log here.
-            # We now accumulate the PPO total throughput from the dedicated
-            # field returned by run_ppo_day (arb + activation), with a
-            # safe fallback to the legacy formula.
+            # The MILP `power_trajectory` returned by the optimizer contains
+            # only the arbitrage component (P_discharge - P_charge); the
+            # activation throughput from FCR/aFRR/mFRR is in a separate field
+            # `flexibility_activations`. Summing |power_trajectory| alone
+            # under-counts the MILP cycling by exactly the activation MWh
+            # and made earlier reports look like "MILP cycles 550 MWh while
+            # PPO cycles 1700 MWh", which is misleading: most of MILP's
+            # cycling is the aFRR activations driven by the 2 MW reservation.
+            # We now aggregate the full MILP throughput as arbitrage + the
+            # three service activations, symmetric with the PPO side. The
+            # PPO total throughput is already correctly computed in
+            # run_ppo_day, with a safe fallback to the legacy formula.
             # ----------------------------------------------------------------
-            milp_th += sum(abs(p) for p in milp_res["power_trajectory"])
+            milp_acts = milp_res.get("flexibility_activations", {})
+            milp_activation_th = sum(
+                sum(milp_acts.get(s, [])) for s in ("FCR", "aFRR", "mFRR")
+            )
+            milp_th += (sum(abs(p) for p in milp_res["power_trajectory"])
+                        + milp_activation_th)
             ppo_th  += ppo_res.get(
                 "total_throughput_mwh",
                 sum(abs(p) for p in ppo_res["power_trajectory"])
