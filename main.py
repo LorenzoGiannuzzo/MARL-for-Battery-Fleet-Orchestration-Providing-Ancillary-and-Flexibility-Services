@@ -1457,7 +1457,6 @@ def main() -> int:
     print(f"\nAll outputs saved under: {paths.root.resolve()}")
     return 0
 
-
 if __name__ == "__main__":
     try:
         sys.exit(main())
