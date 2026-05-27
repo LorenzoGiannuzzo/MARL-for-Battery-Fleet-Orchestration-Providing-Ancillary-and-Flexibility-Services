@@ -176,6 +176,25 @@ class MILPOptimizer:
             "B_discharge", range(time_horizon), cat='Binary'
         )
 
+        # Block 4 (May 2026): binary participation indicators per service per
+        # hour. Used to enforce ARERA minimum-capacity rules via a big-M
+        # formulation in `add_market_constraints`:
+        #   R_s,t  in  {0}  U  [min_cap_s, max_power]
+        # implemented as
+        #   R_s,t <= max_power * B_s,t
+        #   R_s,t >= min_cap_s * B_s,t
+        # so that B_s,t = 0 forces R_s,t = 0, while B_s,t = 1 forces
+        # R_s,t >= min_cap_s.
+        variables['B_fcr'] = pulp.LpVariable.dicts(
+            "B_fcr", range(time_horizon), cat='Binary'
+        )
+        variables['B_afrr'] = pulp.LpVariable.dicts(
+            "B_afrr", range(time_horizon), cat='Binary'
+        )
+        variables['B_mfrr'] = pulp.LpVariable.dicts(
+            "B_mfrr", range(time_horizon), cat='Binary'
+        )
+
         return variables
 
     def add_battery_constraints(self, variables: Dict, time_horizon: int):
@@ -265,39 +284,82 @@ class MILPOptimizer:
     def add_market_constraints(self, variables: Dict, time_horizon: int,
                                flexibility_services: List[List[FlexibilityService]]):
         """
-        Add market-specific constraints for flexibility services
+        Add market-specific constraints for flexibility services.
+
+        Block 4 (May 2026): the ARERA minimum-capacity rule
+        (typically 1 MW per service) is now enforced via a big-M
+        formulation. For each service s in {FCR, aFRR, mFRR} and each
+        hour t:
+
+            R_s,t in {0}  U  [min_cap_s, P_max]
+
+        is expressed linearly as
+
+            R_s,t <= P_max * B_s,t           (B_s,t = 0  =>  R_s,t = 0)
+            R_s,t >= min_cap_s * B_s,t       (B_s,t = 1  =>  R_s,t >= min_cap_s)
+
+        where B_s,t is the binary participation indicator created in
+        `create_decision_variables`. When the service is unavailable in a
+        given hour (no FlexibilityService entry for that t), we force
+        B_s,t = 0, which in turn forces R_s,t = 0.
 
         Args:
-            variables: Dictionary of decision variables
-            time_horizon: Number of time steps
-            flexibility_services: List of available services for each time step
+            variables: Dictionary of decision variables.
+            time_horizon: Number of time steps.
+            flexibility_services: List of available services per hour.
         """
         constraints = []
+        P_max = float(self.battery_params.max_power_mw)
 
         for t in range(time_horizon):
             services = flexibility_services[t]
-
-            # Find services by type
-            fcr_service = next((s for s in services if s.service_type == ServiceType.FCR), None)
+            fcr_service  = next((s for s in services if s.service_type == ServiceType.FCR),  None)
             afrr_service = next((s for s in services if s.service_type == ServiceType.AFRR), None)
             mfrr_service = next((s for s in services if s.service_type == ServiceType.MFRR), None)
 
-            # Minimum capacity constraints
-            if fcr_service:
-                # Either reserve 0 or at least minimum capacity
-                # This is approximated as: if R_fcr > 0, then R_fcr >= min_capacity
-                # For linear formulation, we use: R_fcr >= min_capacity * B_fcr
-                # where B_fcr is binary variable indicating FCR participation
-                pass  # Simplified for now - can be enhanced with binary variables
+            # ---------------- FCR ----------------
+            if fcr_service is not None:
+                m_fcr = float(fcr_service.min_capacity)
+                # Upper bound: R_fcr <= P_max * B_fcr
+                constraints.append(
+                    variables['R_fcr'][t] <= P_max * variables['B_fcr'][t]
+                )
+                # Lower bound: R_fcr >= min_cap * B_fcr
+                constraints.append(
+                    variables['R_fcr'][t] >= m_fcr * variables['B_fcr'][t]
+                )
+            else:
+                # Service not available this hour: force R_fcr = 0
+                constraints.append(variables['B_fcr'][t] == 0)
+                constraints.append(variables['R_fcr'][t] == 0)
 
-            # Similar for other services
-            if afrr_service:
-                pass  # Minimum capacity constraint for aFRR
+            # ---------------- aFRR ----------------
+            if afrr_service is not None:
+                m_afrr = float(afrr_service.min_capacity)
+                constraints.append(
+                    variables['R_afrr'][t] <= P_max * variables['B_afrr'][t]
+                )
+                constraints.append(
+                    variables['R_afrr'][t] >= m_afrr * variables['B_afrr'][t]
+                )
+            else:
+                constraints.append(variables['B_afrr'][t] == 0)
+                constraints.append(variables['R_afrr'][t] == 0)
 
-            if mfrr_service:
-                pass  # Minimum capacity constraint for mFRR
+            # ---------------- mFRR ----------------
+            if mfrr_service is not None:
+                m_mfrr = float(mfrr_service.min_capacity)
+                constraints.append(
+                    variables['R_mfrr'][t] <= P_max * variables['B_mfrr'][t]
+                )
+                constraints.append(
+                    variables['R_mfrr'][t] >= m_mfrr * variables['B_mfrr'][t]
+                )
+            else:
+                constraints.append(variables['B_mfrr'][t] == 0)
+                constraints.append(variables['R_mfrr'][t] == 0)
 
-        # Add constraints to problem
+        # Register all constraints with the problem
         for i, constraint in enumerate(constraints):
             self.problem += constraint, f"Market_Constraint_{i}"
 

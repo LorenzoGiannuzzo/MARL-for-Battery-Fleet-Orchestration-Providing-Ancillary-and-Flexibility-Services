@@ -1,0 +1,234 @@
+{
+  "config": {
+    "mode": "full",
+    "days": 365,
+    "pretrain_months": 2,
+    "retrain_frequency_months": 1,
+    "train_error_distribution": "normal",
+    "eval_error_distributions": [
+      "uniform",
+      "normal",
+      "ornstein-uhlenbeck",
+      "fixed-bias"
+    ],
+    "seed": 42,
+    "pretrain_timesteps": 1000000,
+    "retrain_timesteps": 200000,
+    "learning_rate": 0.0003,
+    "ent_coef": 0.05,
+    "battery_capacity_mwh": 4.0,
+    "battery_max_power_mw": 2.0,
+    "battery_efficiency": 0.95,
+    "cycle_life": 6000,
+    "degradation_cost_per_mwh": 25000.0,
+    "output_root": "results",
+    "model_path": "ppo_models/main_ppo.zip",
+    "run_name": "run_20260525_120358",
+    "skip_train": false,
+    "enable_reward_shaping": true,
+    "verbose": true
+  },
+  "evaluated_distributions": [
+    "fixed-bias",
+    "normal",
+    "ornstein-uhlenbeck",
+    "uniform"
+  ],
+  "train_distribution": "normal",
+  "per_distribution": {
+    "fixed-bias": {
+      "horizon_days": 365,
+      "final_cumulative_profit_eur": {
+        "milp": 1573226.2031144237,
+        "ppo": 1127872.8797338053,
+        "milp_minus_ppo": 445353.32338061836
+      },
+      "average_daily_profit_eur": {
+        "milp": 4310.208775655957,
+        "ppo": 3090.0626842022084
+      },
+      "profit_breakdown_total_eur": {
+        "milp": {
+          "arbitrage": 62244.53335442396,
+          "flexibility": 1547481.6697600002,
+          "fcr": 0.0,
+          "afrr": 967176.0436,
+          "mfrr": 0.0,
+          "degradation_cost": 36500.0
+        },
+        "ppo": {
+          "arbitrage": 8390.099608626078,
+          "flexibility": 1126381.5344970666,
+          "fcr": 1275.4198995081526,
+          "afrr": 1110523.7142837064,
+          "mfrr": 14582.400313852206,
+          "degradation_cost": 6898.75437188663
+        }
+      },
+      "execution_time_seconds": {
+        "milp_total": 40.20138239860535,
+        "milp_mean_per_day": 0.11014077369480917,
+        "ppo_total": 8.093299150466919,
+        "ppo_mean_per_day": 0.022173422330046353,
+        "milp_over_ppo_ratio": 4.96724285747995
+      },
+      "battery_utilization": {
+        "milp_mean": 0.5,
+        "ppo_mean": 0.010510443387155713
+      },
+      "throughput_total_mwh": {
+        "milp": 554.7999999999972,
+        "ppo": 184.1429681429688
+      }
+    },
+    "normal": {
+      "horizon_days": 365,
+      "final_cumulative_profit_eur": {
+        "milp": 1572395.547172992,
+        "ppo": 800109.7866045637,
+        "milp_minus_ppo": 772285.7605684283
+      },
+      "average_daily_profit_eur": {
+        "milp": 4307.933005953403,
+        "ppo": 2192.08160713579
+      },
+      "profit_breakdown_total_eur": {
+        "milp": {
+          "arbitrage": 61340.2364529919,
+          "flexibility": 1547555.3107200004,
+          "fcr": 0.0,
+          "afrr": 967222.0692,
+          "mfrr": 0.0,
+          "degradation_cost": 36500.0
+        },
+        "ppo": {
+          "arbitrage": 8316.426184830165,
+          "flexibility": 796072.4048936262,
+          "fcr": 582.6435113329029,
+          "afrr": 786831.4674271672,
+          "mfrr": 8658.293955126039,
+          "degradation_cost": 4279.044473892982
+        }
+      },
+      "execution_time_seconds": {
+        "milp_total": 49.65410089492798,
+        "milp_mean_per_day": 0.13603863258884377,
+        "ppo_total": 19.782877445220947,
+        "ppo_mean_per_day": 0.05419966423348205,
+        "milp_over_ppo_ratio": 2.5099534196893676
+      },
+      "battery_utilization": {
+        "milp_mean": 0.5,
+        "ppo_mean": 0.010379878873029555
+      },
+      "throughput_total_mwh": {
+        "milp": 554.7999999999972,
+        "ppo": 181.85547785547874
+      }
+    },
+    "ornstein-uhlenbeck": {
+      "horizon_days": 365,
+      "final_cumulative_profit_eur": {
+        "milp": 1571013.0907226694,
+        "ppo": 784687.4837771992,
+        "milp_minus_ppo": 786325.6069454702
+      },
+      "average_daily_profit_eur": {
+        "milp": 4304.145454034712,
+        "ppo": 2149.8287226772572
+      },
+      "profit_breakdown_total_eur": {
+        "milp": {
+          "arbitrage": 59077.83376266957,
+          "flexibility": 1548435.2569600001,
+          "fcr": 0.0,
+          "afrr": 967772.0356000001,
+          "mfrr": 0.0,
+          "degradation_cost": 36500.0
+        },
+        "ppo": {
+          "arbitrage": 7400.115466209736,
+          "flexibility": 781360.5842181082,
+          "fcr": 706.2030998817119,
+          "afrr": 772690.349922655,
+          "mfrr": 7964.031195571438,
+          "degradation_cost": 4073.2159071188858
+        }
+      },
+      "execution_time_seconds": {
+        "milp_total": 40.308414459228516,
+        "milp_mean_per_day": 0.11043401221706442,
+        "ppo_total": 9.035526752471924,
+        "ppo_mean_per_day": 0.02475486781499157,
+        "milp_over_ppo_ratio": 4.461102884588439
+      },
+      "battery_utilization": {
+        "milp_mean": 0.5,
+        "ppo_mean": 0.009231230464107175
+      },
+      "throughput_total_mwh": {
+        "milp": 539.5999999999974,
+        "ppo": 161.73115773115822
+      }
+    },
+    "uniform": {
+      "horizon_days": 365,
+      "final_cumulative_profit_eur": {
+        "milp": 1571271.0375683983,
+        "ppo": 866689.8247826044,
+        "milp_minus_ppo": 704581.2127857939
+      },
+      "average_daily_profit_eur": {
+        "milp": 4304.852157721638,
+        "ppo": 2374.492670637273
+      },
+      "profit_breakdown_total_eur": {
+        "milp": {
+          "arbitrage": 60607.789568397646,
+          "flexibility": 1547163.2480000001,
+          "fcr": 0.0,
+          "afrr": 966977.03,
+          "mfrr": 0.0,
+          "degradation_cost": 36500.0
+        },
+        "ppo": {
+          "arbitrage": 8280.344292396065,
+          "flexibility": 863026.782527172,
+          "fcr": 613.1899190347709,
+          "afrr": 855787.9121105148,
+          "mfrr": 6625.68049762243,
+          "degradation_cost": 4617.302036963383
+        }
+      },
+      "execution_time_seconds": {
+        "milp_total": 41.878578424453735,
+        "milp_mean_per_day": 0.11473583129987325,
+        "ppo_total": 8.696592330932617,
+        "ppo_mean_per_day": 0.0238262803587195,
+        "milp_over_ppo_ratio": 4.815515874591157
+      },
+      "battery_utilization": {
+        "milp_mean": 0.5,
+        "ppo_mean": 0.010331094577669916
+      },
+      "throughput_total_mwh": {
+        "milp": 553.2799999999972,
+        "ppo": 181.00077700077787
+      }
+    }
+  },
+  "robustness_cross_distribution": {
+    "milp": {
+      "annual_profit_mean": 1571976.4696446205,
+      "annual_profit_std": 889.2683905541587,
+      "annual_profit_range": 2213.1123917542864,
+      "coefficient_of_variation": 0.0005657008280506877
+    },
+    "ppo": {
+      "annual_profit_mean": 894839.9937245431,
+      "annual_profit_std": 138025.49181397562,
+      "annual_profit_range": 343185.39595660614,
+      "coefficient_of_variation": 0.15424600239365668
+    }
+  }
+}

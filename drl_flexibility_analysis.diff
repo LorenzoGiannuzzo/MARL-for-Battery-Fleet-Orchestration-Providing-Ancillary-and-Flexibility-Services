@@ -1,0 +1,223 @@
+--- /mnt/user-data/uploads/1779875250092_drl_flexibility_analysis.py	2026-05-27 09:47:30.713393000 +0000
++++ drl_flexibility_analysis.py	2026-05-27 09:50:55.773117881 +0000
+@@ -107,56 +107,196 @@
+ 
+ 
+ class OrnsteinUhlenbeckNoise:
+-    """Ornstein-Uhlenbeck process for time-correlated forecast errors"""
++    """Ornstein-Uhlenbeck process for time-correlated forecast errors.
+ 
+-    def __init__(self, theta=0.15, sigma=0.2, dt=1.0):
+-        self.theta = theta  # Mean reversion rate
+-        self.sigma = sigma  # Volatility
+-        self.dt = dt  # Time step
+-        self.x = 0.0  # Current state
++    Discrete-time Euler-Maruyama update:
++
++        X_{t+1} = X_t + theta * (mu - X_t) * dt + sigma * sqrt(dt) * eps_t
++
++    where eps_t ~ N(0, 1). Equivalent to AR(1) with phi = 1 - theta*dt and
++    intercept theta*mu*dt; the stationary mean is mu, the stationary
++    variance is sigma^2 / (2*theta) (continuous limit) or
++    sigma^2 / (1 - phi^2) for the discrete version.
++
++    Parameters
++    ----------
++    theta : float, default 0.15
++        Mean reversion rate (1/h).
++    mu : float, default 0.0
++        Long-run mean of the process. NB: prior to Block 2 (May 2026) this
++        was hardcoded to 0; it is now exposed so empirically calibrated
++        biases (e.g. +0.025 in gas-crisis 2022) can be honoured.
++    sigma : float, default 0.2
++        Innovation volatility per sqrt(h).
++    dt : float, default 1.0
++        Integration time step. Keep at 1.0 for hourly markets.
++    clip_low, clip_high : float
++        Output clipping bounds. Default matches the hardcoded
++        FORECAST_ERROR_MIN/MAX (-0.15, +0.15) used historically by the
++        non-OU branches; pass wider bounds when using empirically
++        calibrated sigma values that legitimately exceed 0.15.
++    """
++
++    def __init__(self, theta=0.15, sigma=0.2, dt=1.0, mu=0.0,
++                 clip_low=FORECAST_ERROR_MIN, clip_high=FORECAST_ERROR_MAX):
++        self.theta = theta
++        self.mu = mu
++        self.sigma = sigma
++        self.dt = dt
++        self.clip_low = clip_low
++        self.clip_high = clip_high
++        self.x = mu  # start at the long-run mean (not 0) to avoid an
++                     # initial transient when mu != 0.
+ 
+     def sample(self):
+-        """Generate next correlated error sample"""
+-        dx = -self.theta * self.x * self.dt + self.sigma * np.sqrt(self.dt) * np.random.randn()
++        """Generate next correlated error sample."""
++        dx = (self.theta * (self.mu - self.x) * self.dt
++              + self.sigma * np.sqrt(self.dt) * np.random.randn())
+         self.x += dx
+-        return np.clip(self.x, FORECAST_ERROR_MIN, FORECAST_ERROR_MAX)
++        return np.clip(self.x, self.clip_low, self.clip_high)
+ 
+     def reset(self):
+-        """Reset process to initial state"""
+-        self.x = 0.0
++        """Reset process to its initial state (long-run mean)."""
++        self.x = self.mu
+ 
+ 
+ class ForecastErrorGenerator:
+-    """Stochastic forecast error generator for price predictions"""
++    """Stochastic forecast error generator for price predictions.
++
++    Generates relative price errors that are applied multiplicatively:
++
++        forecast_price = true_price * (1 + error)
++
++    Four distribution families are supported: 'uniform', 'normal',
++    'ornstein-uhlenbeck', and 'fixed-bias'.
+ 
+-    def __init__(self, error_type='uniform'):
++    Default parameters (backward-compatible) use the historical hardcoded
++    values: U(-0.15, +0.15) for uniform, N(0, 0.05) for normal (= MAX/3
++    clipped to [-0.15, +0.15]), OU(theta=0.15, mu=0, sigma=0.2), and
++    +10% for fixed-bias.
++
++    To use empirically calibrated parameters (e.g. fit on the Italian PUN
++    MGP vs MI-A1 residuals via Block 1), pass a `params` dict whose keys
++    match the distribution branch:
++
++        - 'uniform':           {'loc': float, 'half_width': float}
++        - 'normal':            {'mu': float, 'sigma': float, 'clip_low': float,
++                                'clip_high': float}
++        - 'ornstein-uhlenbeck': {'theta': float, 'mu': float, 'sigma': float,
++                                'clip_low': float, 'clip_high': float}
++        - 'fixed-bias':        {'bias': float}
++
++    Or, more conveniently, use the classmethod `from_calibration_json`.
++    """
++
++    # Wide clipping bounds used when the calibration produces a sigma that
++    # exceeds the legacy +/-15% range. Matches roughly +/-5 std of the OU
++    # stationary distribution for the 2022 gas-crisis regime.
++    DEFAULT_WIDE_CLIP_LOW = -1.0
++    DEFAULT_WIDE_CLIP_HIGH = +1.0
++
++    def __init__(self, error_type='uniform', params=None):
+         self.error_type = error_type
+-        self.ou_noise = OrnsteinUhlenbeckNoise() if error_type == 'ornstein-uhlenbeck' else None
+-        self.fixed_bias = 0.10  # Fixed +10% error for deterministic testing
++        self.params = dict(params) if params else {}
++        self.ou_noise = None
++        if error_type == 'ornstein-uhlenbeck':
++            p = self.params
++            self.ou_noise = OrnsteinUhlenbeckNoise(
++                theta=p.get('theta', 0.15),
++                mu=p.get('mu', 0.0),
++                sigma=p.get('sigma', 0.2),
++                clip_low=p.get('clip_low', FORECAST_ERROR_MIN),
++                clip_high=p.get('clip_high', FORECAST_ERROR_MAX),
++            )
++        # Legacy attribute kept for backward compatibility; only used by the
++        # 'fixed-bias' branch when no params are provided.
++        self.fixed_bias = self.params.get('bias', 0.10)
++
++    @classmethod
++    def from_calibration_json(cls, json_path: str, regime: str,
++                              error_type: str = 'ornstein-uhlenbeck',
++                              wide_clip: bool = True):
++        """Build a generator from a Block-1 calibrations.json file.
++
++        Parameters
++        ----------
++        json_path : str
++            Path to the JSON file produced by `forecast_error_calibration.
++            save_calibrations_json`.
++        regime : str
++            Regime key inside the JSON (e.g. 'normalized_2023_2024',
++            'gas_crisis_2022').
++        error_type : str
++            Which of the four branches to instantiate. The corresponding
++            parameter block is read from the JSON.
++        wide_clip : bool, default True
++            If True, use wide (+/-100%) clipping bounds instead of the
++            legacy +/-15%. Recommended whenever the calibrated sigma is
++            comparable to or larger than 0.05, which is the case for
++            Italian data.
++        """
++        import json as _json
++        with open(json_path, 'r') as f:
++            doc = _json.load(f)
++        if regime not in doc:
++            raise KeyError(f"regime '{regime}' not in {json_path} "
++                           f"(available: {list(doc)})")
++        block = doc[regime]
++        params = {}
++        if error_type == 'uniform':
++            params = dict(block['uniform'])  # {'loc', 'half_width', ...}
++        elif error_type == 'normal':
++            params = {'mu': block['normal']['mu'],
++                      'sigma': block['normal']['sigma']}
++        elif error_type == 'ornstein-uhlenbeck':
++            params = {'theta': block['ornstein_uhlenbeck']['theta'],
++                      'mu': block['ornstein_uhlenbeck']['mu'],
++                      'sigma': block['ornstein_uhlenbeck']['sigma']}
++        elif error_type == 'fixed-bias':
++            params = {'bias': block['fixed_bias']['bias']}
++        else:
++            raise ValueError(f"unknown error_type: {error_type}")
++        if wide_clip:
++            params.setdefault('clip_low',  cls.DEFAULT_WIDE_CLIP_LOW)
++            params.setdefault('clip_high', cls.DEFAULT_WIDE_CLIP_HIGH)
++        return cls(error_type=error_type, params=params)
+ 
+     def generate_error(self):
+-        """Generate forecast error based on distribution type"""
++        """Generate forecast error based on distribution type."""
++        p = self.params
+         if self.error_type == 'uniform':
+-            return np.random.uniform(FORECAST_ERROR_MIN, FORECAST_ERROR_MAX)
++            # Backward-compatible default: symmetric U(MIN, MAX) when no
++            # params; otherwise U(loc - half, loc + half).
++            if not p:
++                return np.random.uniform(FORECAST_ERROR_MIN, FORECAST_ERROR_MAX)
++            loc = p.get('loc', 0.0)
++            half = p.get('half_width', FORECAST_ERROR_MAX)
++            return float(loc + np.random.uniform(-half, +half))
+         elif self.error_type == 'normal':
+-            error = np.random.normal(0, FORECAST_ERROR_MAX / 3)
+-            return np.clip(error, FORECAST_ERROR_MIN, FORECAST_ERROR_MAX)
++            if not p:
++                error = np.random.normal(0.0, FORECAST_ERROR_MAX / 3.0)
++                return float(np.clip(error, FORECAST_ERROR_MIN, FORECAST_ERROR_MAX))
++            mu = p.get('mu', 0.0)
++            sigma = p.get('sigma', FORECAST_ERROR_MAX / 3.0)
++            lo = p.get('clip_low',  FORECAST_ERROR_MIN)
++            hi = p.get('clip_high', FORECAST_ERROR_MAX)
++            return float(np.clip(np.random.normal(mu, sigma), lo, hi))
+         elif self.error_type == 'ornstein-uhlenbeck':
+-            return self.ou_noise.sample()
++            return float(self.ou_noise.sample())
+         elif self.error_type == 'fixed-bias':
+-            return self.fixed_bias
++            return float(p.get('bias', self.fixed_bias))
+         else:
+             return 0.0
+ 
+     def apply_error(self, true_price):
+-        """Apply error to true price to generate forecast"""
++        """Apply error to true price to generate forecast."""
+         error = self.generate_error()
+         forecast_price = true_price * (1 + error)
+         return forecast_price, error
+ 
+     def reset(self):
+-        """Reset error generator state"""
+-        if self.ou_noise:
++        """Reset error generator state."""
++        if self.ou_noise is not None:
+             self.ou_noise.reset()
+ 
+ 

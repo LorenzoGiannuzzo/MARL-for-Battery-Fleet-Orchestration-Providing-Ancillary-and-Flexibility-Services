@@ -1,0 +1,70 @@
+{
+  "gas_crisis_2022": {
+    "name": "gas_crisis_2022",
+    "n_hours": 8756,
+    "mean": 0.02514,
+    "std": 0.192277,
+    "skewness": 50.589538,
+    "kurtosis_excess": 3552.516555,
+    "lag1_autocorr": 0.590605,
+    "normal": {
+      "mu": 0.02514,
+      "sigma": 0.192277,
+      "log_lik": 2013.304103,
+      "n": 8756
+    },
+    "uniform": {
+      "loc": 0.02514,
+      "half_width": 14.2593,
+      "log_lik": -29337.472739,
+      "n": 8756
+    },
+    "ornstein_uhlenbeck": {
+      "theta": 0.409402,
+      "mu": 0.025168,
+      "sigma": 0.155176,
+      "lag1_autocorr": 0.590598,
+      "log_lik": 3890.46195,
+      "n": 8756
+    },
+    "fixed_bias": {
+      "bias": 0.02514,
+      "rmse": 0.192267,
+      "n": 8756
+    }
+  },
+  "normalized_2023_2024": {
+    "name": "normalized_2023_2024",
+    "n_hours": 10808,
+    "mean": 0.006322,
+    "std": 0.103932,
+    "skewness": 14.649945,
+    "kurtosis_excess": 571.883101,
+    "lag1_autocorr": 0.570921,
+    "normal": {
+      "mu": 0.006322,
+      "sigma": 0.103932,
+      "log_lik": 9134.112543,
+      "n": 10808
+    },
+    "uniform": {
+      "loc": 0.006322,
+      "half_width": 4.844678,
+      "log_lik": -24545.270102,
+      "n": 10808
+    },
+    "ornstein_uhlenbeck": {
+      "theta": 0.429078,
+      "mu": 0.006339,
+      "sigma": 0.085336,
+      "lag1_autocorr": 0.570922,
+      "log_lik": 11264.299543,
+      "n": 10808
+    },
+    "fixed_bias": {
+      "bias": 0.006322,
+      "rmse": 0.103927,
+      "n": 10808
+    }
+  }
+}

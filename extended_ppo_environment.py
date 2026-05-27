@@ -64,10 +64,22 @@ class ExtendedBatteryTradingEnv(gym.Env):
 
         # Conflict resolution strategy configuration
         self.conflict_strategy = conflict_strategy  # 'revenue_priority', 'arbitrage_priority', 'equal_priority'
-        # Fix 2: price-sensitivity reward shaping (learning aid; ON during training).
-        # At evaluation/deployment time the realized economic profit (without the
-        # bonus) is what matters; the bonus shapes only the learning gradient.
-        self.enable_reward_shaping = enable_reward_shaping
+        # ====================================================================
+        # Reward is now exactly the economic objective of the MILP, namely
+        #    reward = arbitrage_profit + flexibility_revenue - degradation_cost
+        #            + soc_penalty
+        # The soc_penalty is kept as a soft-constraint surrogate for the
+        # MILP's hard SOC bounds; it does not bias the optimal policy as
+        # long as the agent learns to stay in [SOC_MIN, SOC_MAX].
+        #
+        # The previous Fix 2 price-sensitivity bonus and the conflict_penalty
+        # have been REMOVED to allow a fair like-for-like comparison with
+        # the MILP objective. The `enable_reward_shaping` parameter is kept
+        # in the signature for backward compatibility with existing callers
+        # (e.g. main.py train_ppo / retrain_ppo / run_ppo_day) but is now a
+        # no-op. Pass it through if you want, it just has no effect.
+        # ====================================================================
+        self.enable_reward_shaping = enable_reward_shaping  # deprecated, no-op
 
         # Environment state
         self.current_step = 0
@@ -607,67 +619,48 @@ class ExtendedBatteryTradingEnv(gym.Env):
         total_energy_used = arbitrage_throughput + activation_throughput
         degradation_cost = total_energy_used * DEGRADATION_COST_PER_MWH / (2 * 6000)
 
-        # SOC violation penalty
+        # SOC violation penalty (soft-constraint surrogate for MILP hard
+        # bounds; remains in the reward to give the PPO a learning signal,
+        # but is structured so that an optimal policy that respects
+        # [SOC_MIN, SOC_MAX] sees zero contribution from this term.
         soc_penalty = 0.0
         if self.battery.soc > SOC_MAX:
             soc_penalty = -abs(self.battery.soc - SOC_MAX) * SOC_VIOLATION_PENALTY
         elif self.battery.soc < SOC_MIN:
             soc_penalty = -abs(self.battery.soc - SOC_MIN) * SOC_VIOLATION_PENALTY
 
-        # Conflict resolution penalty (if actions were scaled down due to conflicts).
-        # Use the pre-conflict-resolution arbitrage value, recovered by decoding
-        # the raw action once more (cheap).
-        conflict_penalty = 0.0
-        pre_actions = self._decode_action(action)
-        original_arbitrage = pre_actions['arbitrage']
-        if abs(actions['arbitrage'] - original_arbitrage) > 0.01:  # Action was modified
-            # Small penalty for not being able to execute desired action
-            conflict_penalty = -0.1 * abs(actions['arbitrage'] - original_arbitrage)
-
         # ====================================================================
-        # Fix 2: PRICE-SENSITIVITY INTRINSIC REWARD (learning aid only)
+        # Reward: exact MILP economic objective + SOC soft-constraint surrogate
         # --------------------------------------------------------------------
-        # The MILP can see the full 24-hour price horizon and arbitrage
-        # optimally; the PPO must learn the price signal from the state. With
-        # an arbitrage profit of ~5 EUR/MWh delta between peak/off-peak hours
-        # and an aFRR capacity payment of ~25 EUR/MW/h dominating the reward,
-        # the PPO has no incentive to learn price sensitivity and converges
-        # to a price-blind policy.
+        # The PPO now optimises exactly what the MILP optimises:
         #
-        # This term injects an explicit signal that rewards "discharge when
-        # the price is HIGH relative to the daily mean" and "charge when LOW".
-        # It does NOT change the realized economic profit (arbitrage_profit
-        # remains the truth-of-record), it only shapes the learning gradient.
-        # The coefficient is small enough that it does not distort the
-        # asymptotic optimal policy.
+        #   reward = arbitrage_profit + flexibility_revenue - degradation_cost
+        #            + soc_penalty
         #
-        # The shaping is disabled at evaluation time via the
-        # `enable_reward_shaping` flag (default True during training).
+        # Previously this function added two extra terms that have been
+        # REMOVED for a like-for-like comparison with the MILP:
+        #   (i)  a conflict_penalty proportional to how much the conflict
+        #        resolver scaled down the requested action. The MILP never
+        #        emits infeasible actions so it has no equivalent term.
+        #   (ii) a price-sensitivity intrinsic bonus
+        #        PRICE_SHAPING_K * (-arbitrage_energy) * price_deviation
+        #        that biased the gradient toward "discharge high, charge
+        #        low". This was helpful for learning but is not part of the
+        #        MILP objective, so it must not appear in the realised
+        #        reward of the agent under comparison.
+        #
+        # If the PPO does not converge to a competitive policy under the
+        # clean reward, the recommended remedies are (in order):
+        #   (a) reward normalisation via VecNormalize(norm_reward=True);
+        #   (b) curriculum: start with flexibility_enabled=False, fine-tune
+        #       with flex enabled;
+        #   (c) behavioural-cloning warm-start from MILP trajectories;
+        #   (d) potential-based shaping F = gamma * phi(s') - phi(s) which
+        #       is provably policy-invariant.
+        # NOT: ad-hoc bonus terms in the reward.
         # ====================================================================
-        price_shaping_bonus = 0.0
-        if getattr(self, 'enable_reward_shaping', True) and self.flexibility_enabled:
-            # Look at the daily mean price from the forecast window in the obs
-            # We compute it on the fly from the raw forecast prices accessible
-            # via the environment's internal state.
-            forecast_window = self.prices[self.current_step:
-                                          self.current_step + 24]
-            if len(forecast_window) > 0:
-                daily_mean = float(np.mean(forecast_window))
-                price_deviation = (true_price - daily_mean) / max(daily_mean, 1.0)
-                # arbitrage_energy > 0 = charging (we want this when price < mean)
-                # arbitrage_energy < 0 = discharging (we want this when price > mean)
-                # So the dot product (-energy) * deviation is positive when the
-                # agent is doing the right thing.
-                # Coefficient PRICE_SHAPING_K is small relative to typical
-                # arbitrage_profit so as not to override the real economic signal.
-                PRICE_SHAPING_K = 5.0
-                price_shaping_bonus = (
-                    PRICE_SHAPING_K * (-arbitrage_energy) * price_deviation
-                )
-
-        # Total reward: profit + flexibility_revenue - degradation + penalties + shaping
-        reward = (arbitrage_profit + flexibility_revenue - degradation_cost +
-                 soc_penalty + conflict_penalty + price_shaping_bonus)
+        reward = (arbitrage_profit + flexibility_revenue
+                  - degradation_cost + soc_penalty)
 
         # Update step
         self.current_step += 1
@@ -692,7 +685,7 @@ class ExtendedBatteryTradingEnv(gym.Env):
             'activation_throughput_mwh': activation_throughput,
             'total_throughput_mwh': total_energy_used,
             'soc_penalty': soc_penalty,
-            'conflict_penalty': conflict_penalty,
+            'conflict_penalty': 0.0,  # deprecated, kept in dict for backward compat
             'total_reward': reward,
             'soc': self.battery.soc,
             'reserved_fcr': self.reserved_fcr,

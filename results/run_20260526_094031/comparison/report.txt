@@ -1,0 +1,121 @@
+==============================================================================
+PPO vs MILP BESS Comparison - Cross-Distribution Summary Report
+==============================================================================
+
+Train distribution:           normal
+Evaluated distributions:      ['fixed-bias', 'normal', 'ornstein-uhlenbeck', 'uniform']
+Battery:                      4.0 MWh / 2.0 MW, cycle_life=6000
+
+------------------------------------------------------------------------------
+Distribution: fixed-bias   (horizon = 365 days)
+------------------------------------------------------------------------------
+  Final cumulative profit:
+    MILP:                     1573146.59 EUR
+    PPO:                       803534.68 EUR
+    MILP - PPO gap:           +769611.91 EUR
+  Execution time:
+    MILP total:                    43.07 s (0.118 s/day)
+    PPO  total:                    15.02 s (0.041 s/day)
+    MILP/PPO ratio:                 2.87x
+  Throughput (MWh):       MILP=554.80   PPO=0.40
+  MILP revenue breakdown (EUR):
+    Arbitrage:                 +62104.65
+    FCR:                           +0.00
+    aFRR:                     +967592.53
+    mFRR:                          +0.00
+    Degradation:               -36500.00
+  PPO  revenue breakdown (EUR):
+    Arbitrage:                    +41.17
+    FCR:                           +0.00
+    aFRR:                     +807230.64
+    mFRR:                          +0.00
+    Degradation:                -3737.14
+
+------------------------------------------------------------------------------
+Distribution: normal   (horizon = 365 days)
+------------------------------------------------------------------------------
+  Final cumulative profit:
+    MILP:                     1572401.74 EUR
+    PPO:                       799930.50 EUR
+    MILP - PPO gap:           +772471.24 EUR
+  Execution time:
+    MILP total:                    43.80 s (0.120 s/day)
+    PPO  total:                    16.48 s (0.045 s/day)
+    MILP/PPO ratio:                 2.66x
+  Throughput (MWh):       MILP=554.80   PPO=0.00
+  MILP revenue breakdown (EUR):
+    Arbitrage:                 +61341.95
+    FCR:                           +0.00
+    aFRR:                     +967594.45
+    mFRR:                          +0.00
+    Degradation:               -36500.00
+  PPO  revenue breakdown (EUR):
+    Arbitrage:                     +0.00
+    FCR:                           +0.00
+    aFRR:                     +803786.52
+    mFRR:                          +0.00
+    Degradation:                -3856.02
+
+------------------------------------------------------------------------------
+Distribution: ornstein-uhlenbeck   (horizon = 365 days)
+------------------------------------------------------------------------------
+  Final cumulative profit:
+    MILP:                     1571018.26 EUR
+    PPO:                       799713.45 EUR
+    MILP - PPO gap:           +771304.81 EUR
+  Execution time:
+    MILP total:                    43.63 s (0.120 s/day)
+    PPO  total:                    16.85 s (0.046 s/day)
+    MILP/PPO ratio:                 2.59x
+  Throughput (MWh):       MILP=541.12   PPO=3.27
+  MILP revenue breakdown (EUR):
+    Arbitrage:                 +59151.63
+    FCR:                           +0.00
+    aFRR:                     +968080.94
+    mFRR:                          +0.00
+    Degradation:               -36500.00
+  PPO  revenue breakdown (EUR):
+    Arbitrage:                   +191.81
+    FCR:                           +0.00
+    aFRR:                     +803384.48
+    mFRR:                          +0.00
+    Degradation:                -3862.84
+
+------------------------------------------------------------------------------
+Distribution: uniform   (horizon = 365 days)
+------------------------------------------------------------------------------
+  Final cumulative profit:
+    MILP:                     1571207.13 EUR
+    PPO:                      1339847.87 EUR
+    MILP - PPO gap:           +231359.26 EUR
+  Execution time:
+    MILP total:                    48.53 s (0.133 s/day)
+    PPO  total:                    16.81 s (0.046 s/day)
+    MILP/PPO ratio:                 2.89x
+  Throughput (MWh):       MILP=554.80   PPO=0.00
+  MILP revenue breakdown (EUR):
+    Arbitrage:                 +60658.43
+    FCR:                           +0.00
+    aFRR:                     +967298.75
+    mFRR:                          +0.00
+    Degradation:               -36500.00
+  PPO  revenue breakdown (EUR):
+    Arbitrage:                     +0.00
+    FCR:                         +700.21
+    aFRR:                    +1347675.62
+    mFRR:                          +0.00
+    Degradation:                -8527.96
+
+==============================================================================
+Robustness across forecast-error distributions
+==============================================================================
+
+  Annual profit across distributions (mean +/- std):
+    MILP: 1571943.43 +/- 874.03 EUR (range = 2128.32, CV = 0.0006)
+    PPO:   935756.62 +/- 233307.13 EUR (range = 540134.42, CV = 0.2493)
+
+  Interpretation: lower CV = more robust to forecast-error structure.
+  Compare the two CVs to assess which algorithm degrades less under
+  forecast-error distributions it was not trained on.
+
+==============================================================================

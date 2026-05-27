@@ -1,0 +1,150 @@
+--- /mnt/user-data/uploads/1779875294752_main.py	2026-05-27 09:48:15.348178000 +0000
++++ main.py	2026-05-27 09:52:19.274588260 +0000
+@@ -127,6 +127,15 @@
+     flex_price_error_pct: float = 0.05   # Opt B: forecast error on FCR/aFRR/mFRR tariffs (5% default)
+     verbose: bool = True
+ 
++    # Block 2: empirically calibrated forecast-error parameters.
++    # If `forecast_calibration_json` is set, the ForecastErrorGenerator
++    # used during pretraining, retraining, and evaluation is built via
++    # `ForecastErrorGenerator.from_calibration_json(...)` rather than from
++    # the default hardcoded parameters. The `forecast_regime` key selects
++    # which regime block to read from the JSON.
++    forecast_calibration_json: Optional[str] = None
++    forecast_regime: str = "normalized_2023_2024"
++
+ 
+ def parse_args() -> PipelineConfig:
+     """Parse command-line arguments into a PipelineConfig."""
+@@ -171,6 +180,18 @@
+                         "tariffs (default 0.05 = +/-5%%). Set to 0 to recover the "
+                         "deterministic-flexibility-tariff regime (ablation).")
+     p.add_argument("--quiet", action="store_true")
++    p.add_argument(
++        "--forecast-calibration-json", default=None,
++        help="Path to Block-1 calibrations.json. When provided, the four "
++             "ForecastErrorGenerator branches use empirically calibrated "
++             "parameters instead of the legacy hardcoded defaults.",
++    )
++    p.add_argument(
++        "--forecast-regime", default="normalized_2023_2024",
++        help="Regime key inside calibrations.json (e.g. "
++             "'normalized_2023_2024', 'gas_crisis_2022'). "
++             "Ignored unless --forecast-calibration-json is set.",
++    )
+ 
+     args = p.parse_args()
+     cfg = PipelineConfig(
+@@ -191,6 +212,8 @@
+         enable_reward_shaping=not args.no_reward_shaping,
+         flex_price_error_pct=args.flex_price_error,
+         verbose=not args.quiet,
++        forecast_calibration_json=args.forecast_calibration_json,
++        forecast_regime=args.forecast_regime,
+     )
+ 
+     # Mode-specific overrides
+@@ -335,12 +358,36 @@
+ # ============================================================================
+ 
+ 
++def _build_error_generator(
++    error_distribution: str,
++    forecast_calibration_json: Optional[str] = None,
++    forecast_regime: str = "normalized_2023_2024",
++) -> ForecastErrorGenerator:
++    """Build a ForecastErrorGenerator, using empirical calibration when available.
++
++    If `forecast_calibration_json` is None, returns the legacy default
++    generator (hardcoded parameters). Otherwise loads the JSON produced by
++    Block 1 and instantiates the requested distribution with empirically
++    calibrated parameters and wide clipping bounds.
++    """
++    if forecast_calibration_json is None:
++        return ForecastErrorGenerator(error_distribution)
++    return ForecastErrorGenerator.from_calibration_json(
++        json_path=forecast_calibration_json,
++        regime=forecast_regime,
++        error_type=error_distribution,
++        wide_clip=True,
++    )
++
++
+ def make_env(
+     prices: List[float],
+     error_distribution: str,
+     seed: int,
+     enable_reward_shaping: bool = True,
+     flex_price_error_pct: float = 0.05,
++    forecast_calibration_json: Optional[str] = None,
++    forecast_regime: str = "normalized_2023_2024",
+ ) -> ExtendedBatteryTradingEnv:
+     """Construct an ExtendedBatteryTradingEnv with a forecast error generator.
+ 
+@@ -351,8 +398,19 @@
+             net profit (the metric compared to the MILP).
+         flex_price_error_pct: half-width of the uniform forecast error on
+             FCR/aFRR/mFRR tariffs. Default 5%. See FlexibilityMarket docstring.
++        forecast_calibration_json: optional path to a Block-1 calibrations.json
++            file. When provided, the error generator uses empirically
++            calibrated parameters; otherwise falls back to the legacy
++            hardcoded defaults (uniform U(-0.15, +0.15), normal N(0, 0.05),
++            OU(theta=0.15, mu=0, sigma=0.2), fixed-bias = +0.10).
++        forecast_regime: regime key inside the JSON
++            ('normalized_2023_2024' or 'gas_crisis_2022').
+     """
+-    error_gen = ForecastErrorGenerator(error_distribution)
++    error_gen = _build_error_generator(
++        error_distribution=error_distribution,
++        forecast_calibration_json=forecast_calibration_json,
++        forecast_regime=forecast_regime,
++    )
+     return ExtendedBatteryTradingEnv(
+         prices=prices,
+         error_generator=error_gen,
+@@ -381,7 +439,9 @@
+           f"(error dist: {cfg.train_error_distribution})...")
+     env = make_env(pretrain_prices, cfg.train_error_distribution, cfg.seed,
+                    enable_reward_shaping=cfg.enable_reward_shaping,
+-                   flex_price_error_pct=cfg.flex_price_error_pct)
++                   flex_price_error_pct=cfg.flex_price_error_pct,
++                   forecast_calibration_json=cfg.forecast_calibration_json,
++                   forecast_regime=cfg.forecast_regime)
+     vec_env = DummyVecEnv([lambda: env])
+ 
+     model = PPO(
+@@ -430,7 +490,9 @@
+     print(f"  Monthly retraining for month {month_idx} ({cfg.retrain_timesteps:,} timesteps)...")
+     env = make_env(recent_prices, cfg.train_error_distribution, cfg.seed + month_idx,
+                    enable_reward_shaping=cfg.enable_reward_shaping,
+-                   flex_price_error_pct=cfg.flex_price_error_pct)
++                   flex_price_error_pct=cfg.flex_price_error_pct,
++                   forecast_calibration_json=cfg.forecast_calibration_json,
++                   forecast_regime=cfg.forecast_regime)
+     vec_env = DummyVecEnv([lambda: env])
+     model.set_env(vec_env)
+     model.learn(total_timesteps=cfg.retrain_timesteps, reset_num_timesteps=False)
+@@ -569,7 +631,9 @@
+     """
+     env = make_env(daily_prices, eval_distribution, cfg.seed,
+                    enable_reward_shaping=False,
+-                   flex_price_error_pct=cfg.flex_price_error_pct)
++                   flex_price_error_pct=cfg.flex_price_error_pct,
++                   forecast_calibration_json=cfg.forecast_calibration_json,
++                   forecast_regime=cfg.forecast_regime)
+     obs, _ = env.reset()
+     t0 = time.time()
+ 
+@@ -708,7 +772,11 @@
+         # the OU process state at the beginning.
+         rng_state_seed = cfg.seed + 1000 * (dist_idx + 1)
+         np.random.seed(rng_state_seed)
+-        err_gen = ForecastErrorGenerator(dist)
++        err_gen = _build_error_generator(
++            error_distribution=dist,
++            forecast_calibration_json=cfg.forecast_calibration_json,
++            forecast_regime=cfg.forecast_regime,
++        )
+         err_gen.reset()
+         all_errors = [err_gen.generate_error() for _ in range(cfg.days * 24)]
+ 
