@@ -1,0 +1,48 @@
+==============================================================================
+PPO vs MILP BESS Comparison - Cross-Distribution Summary Report
+==============================================================================
+
+Train distribution:           ornstein-uhlenbeck
+Evaluated distributions:      ['ornstein-uhlenbeck']
+Battery:                      4.0 MWh / 2.0 MW, cycle_life=6000
+
+------------------------------------------------------------------------------
+Distribution: ornstein-uhlenbeck   (horizon = 366 days)
+------------------------------------------------------------------------------
+  Final cumulative profit:
+    MILP:                     1583003.28 EUR
+    PPO:                       614219.95 EUR
+    MILP - PPO gap:           +968783.34 EUR
+  Execution time:
+    MILP total:                    55.78 s (0.152 s/day)
+    PPO  total:                    12.52 s (0.034 s/day)
+    MILP/PPO ratio:                 4.46x
+  Throughput (MWh, arb + activation):
+    MILP total:                 17568.00
+    PPO  total:                  2413.50  (arb=730.60, activation=1682.90)
+  MILP revenue breakdown (EUR):
+    Arbitrage:                 +70897.82
+    FCR:                           +0.00
+    aFRR:                    +1548705.46
+    mFRR:                          +0.00
+    Degradation:               -36600.00
+  PPO  revenue breakdown (EUR):
+    Arbitrage:                 +29941.98
+    FCR:                       +12276.54
+    aFRR:                     +526714.61
+    mFRR:                      +50314.95
+    Degradation:                -5028.13
+
+==============================================================================
+Robustness across forecast-error distributions
+==============================================================================
+
+  Annual profit across distributions (mean +/- std):
+    MILP: 1583003.28 +/- 0.00 EUR (range = 0.00, CV = 0.0000)
+    PPO:   614219.95 +/- 0.00 EUR (range = 0.00, CV = 0.0000)
+
+  Interpretation: lower CV = more robust to forecast-error structure.
+  Compare the two CVs to assess which algorithm degrades less under
+  forecast-error distributions it was not trained on.
+
+==============================================================================

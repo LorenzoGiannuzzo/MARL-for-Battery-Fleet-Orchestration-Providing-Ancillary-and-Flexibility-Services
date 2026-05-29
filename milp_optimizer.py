@@ -48,6 +48,12 @@ class OptimizationResult:
     flexibility_activations: Dict[str, List[float]]
     solver_status: str
     objective_value: float
+    # Per-service realized flexibility revenue (capacity + expected activation
+    # energy), computed with the same formula as `flexibility_revenue` so that
+    # FCR + aFRR + mFRR == flexibility_revenue exactly. Added May 2026 to make
+    # the MILP service breakdown consistent with the PPO side (which already
+    # reports capacity + activation per service from the env roll-out).
+    flexibility_revenue_by_service: Dict[str, float] = None
 
 
 @dataclass
@@ -503,7 +509,8 @@ class MILPOptimizer:
                 flexibility_reservations={},
                 flexibility_activations={},
                 solver_status=pulp.LpStatus[self.problem.status],
-                objective_value=0.0
+                objective_value=0.0,
+                flexibility_revenue_by_service={'FCR': 0.0, 'aFRR': 0.0, 'mFRR': 0.0},
             )
 
     def _extract_results(self, variables: Dict, time_horizon: int,
@@ -557,7 +564,11 @@ class MILPOptimizer:
         # Calculate flexibility service revenues (REALIZED payment, computed
         # against the TRUE settlement prices, consistently with the
         # imperfect-foresight regime for energy arbitrage).
+        # We also accumulate the same quantity split per service so that the
+        # downstream breakdown is exactly consistent with the total (the sum
+        # of the three service entries equals flexibility_revenue).
         flexibility_revenue = 0.0
+        flex_rev_by_service = {'FCR': 0.0, 'aFRR': 0.0, 'mFRR': 0.0}
         for t in range(time_horizon):
             services = flexibility_services[t]
 
@@ -577,18 +588,21 @@ class MILPOptimizer:
                     energy_rev = (variables['A_fcr'][t].varValue * true_en *
                                   service.activation_probability)
                     flexibility_revenue += capacity_rev + energy_rev
+                    flex_rev_by_service['FCR'] += capacity_rev + energy_rev
 
                 elif service.service_type == ServiceType.AFRR:
                     capacity_rev = variables['R_afrr'][t].varValue * true_cap
                     energy_rev = (variables['A_afrr'][t].varValue * true_en *
                                   service.activation_probability)
                     flexibility_revenue += capacity_rev + energy_rev
+                    flex_rev_by_service['aFRR'] += capacity_rev + energy_rev
 
                 elif service.service_type == ServiceType.MFRR:
                     capacity_rev = variables['R_mfrr'][t].varValue * true_cap
                     energy_rev = (variables['A_mfrr'][t].varValue * true_en *
                                   service.activation_probability)
                     flexibility_revenue += capacity_rev + energy_rev
+                    flex_rev_by_service['mFRR'] += capacity_rev + energy_rev
 
         # Calculate degradation cost
         # BUG FIX: same marginal formula as in the objective function
@@ -649,7 +663,8 @@ class MILPOptimizer:
             flexibility_reservations=flexibility_reservations,
             flexibility_activations=flexibility_activations,
             solver_status=pulp.LpStatus[self.problem.status],
-            objective_value=pulp.value(self.problem.objective) if self.problem.objective else 0.0
+            objective_value=pulp.value(self.problem.objective) if self.problem.objective else 0.0,
+            flexibility_revenue_by_service=flex_rev_by_service,
         )
 
     def get_solver_info(self) -> Dict:

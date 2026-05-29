@@ -152,6 +152,24 @@ class PipelineConfig:
     eval_year: int = 2024
     msd_zone: str = "Nord"
 
+    # Block 6: behavioural-cloning warm-start. When `warm_start == "bc"`,
+    # PPO pretraining is preceded by a supervised imitation phase in which
+    # the policy network is trained to reproduce the MILP expert's decisions
+    # over the pretraining window. The warm-started policy is then fine-tuned
+    # with the normal PPO objective. When `warm_start == "none"` (default),
+    # PPO trains from random initialisation as before.
+    warm_start: str = "none"          # none | bc
+    bc_epochs: int = 30               # supervised epochs over the demo set
+    bc_batch_size: int = 256
+    bc_lr: float = 3e-4
+    bc_finetune_timesteps: int = -1   # <0 use pretrain budget, 0 skip, >0 explicit
+    # Fine-tuning hyperparameters used ONLY when warm_start == 'bc'. The
+    # standard PPO entropy/lr wash out the BC policy; these reduced values
+    # preserve it. ent_coef=0 removes the push toward a uniform policy; lr<=0
+    # means "use 10% of cfg.learning_rate".
+    bc_finetune_ent_coef: float = 0.0
+    bc_finetune_lr: float = -1.0
+
 
 def parse_args() -> PipelineConfig:
     """Parse command-line arguments into a PipelineConfig."""
@@ -230,6 +248,34 @@ def parse_args() -> PipelineConfig:
     p.add_argument("--msd-zone", default="Nord",
                    help="MSD zone suffix in filenames (Nord, CNor, CSud, "
                         "Sud, ...). Ignored unless --data-source=real.")
+    p.add_argument(
+        "--warm-start", choices=["none", "bc"], default="none",
+        help="PPO initialisation. 'none' (default) trains from random init. "
+             "'bc' runs a behavioural-cloning phase that imitates the MILP "
+             "expert before PPO fine-tuning (Block 6, the paper's main "
+             "contribution).",
+    )
+    p.add_argument("--bc-epochs", type=int, default=30,
+                   help="Supervised epochs over the MILP demonstration set "
+                        "(only used with --warm-start bc).")
+    p.add_argument("--bc-batch-size", type=int, default=256,
+                   help="Minibatch size for behavioural cloning.")
+    p.add_argument("--bc-lr", type=float, default=3e-4,
+                   help="Learning rate for behavioural cloning.")
+    p.add_argument("--bc-finetune-timesteps", type=int, default=-1,
+                   help="PPO fine-tune timesteps after BC. Negative (default) "
+                        "uses the --pretrain-timesteps budget; 0 SKIPS "
+                        "fine-tuning entirely and evaluates the pure BC policy "
+                        "(diagnostic); a positive value is used as-is.")
+    p.add_argument("--bc-finetune-ent-coef", type=float, default=0.0,
+                   help="Entropy coefficient during BC fine-tuning. Default 0 "
+                        "to avoid pushing the imitation policy back toward "
+                        "uniform. Only used with --warm-start bc.")
+    p.add_argument("--bc-finetune-lr", type=float, default=-1.0,
+                   help="Learning rate during BC fine-tuning. Negative "
+                        "(default) uses 10%% of --learning-rate, a gentler "
+                        "schedule that preserves the warm init. Only used "
+                        "with --warm-start bc.")
 
     args = p.parse_args()
     cfg = PipelineConfig(
@@ -257,6 +303,13 @@ def parse_args() -> PipelineConfig:
         train_year=args.train_year,
         eval_year=args.eval_year,
         msd_zone=args.msd_zone,
+        warm_start=args.warm_start,
+        bc_epochs=args.bc_epochs,
+        bc_batch_size=args.bc_batch_size,
+        bc_lr=args.bc_lr,
+        bc_finetune_timesteps=args.bc_finetune_timesteps,
+        bc_finetune_ent_coef=args.bc_finetune_ent_coef,
+        bc_finetune_lr=args.bc_finetune_lr,
     )
 
     # Mode-specific overrides
@@ -617,8 +670,18 @@ def train_ppo(
     cfg: PipelineConfig,
     paths: OutputPaths,
     pretrain_prices: List[float],
+    pretrain_services: Optional[List[List[FlexibilityService]]] = None,
+    battery_params: Optional[BatteryParameters] = None,
+    flex_market: Optional[FlexibilityMarket] = None,
 ) -> Optional[str]:
-    """Pretrain a PPO agent on the pretraining window. Returns the saved model path."""
+    """Pretrain a PPO agent on the pretraining window. Returns the saved model path.
+
+    When cfg.warm_start == 'bc', a behavioural-cloning phase precedes PPO
+    fine-tuning: the policy network is trained to reproduce the MILP expert's
+    quantised decisions over the pretraining window, then PPO fine-tunes from
+    that warm initialisation. BC requires pretrain_services, battery_params,
+    and flex_market to generate the MILP demonstrations.
+    """
     if not PPO_AVAILABLE:
         print("WARNING: stable-baselines3 is not installed. Skipping PPO training.")
         return None
@@ -626,8 +689,6 @@ def train_ppo(
         print("WARNING: no pretraining data provided. Skipping PPO training.")
         return None
 
-    print(f"  Pretraining PPO for {cfg.pretrain_timesteps:,} timesteps "
-          f"(error dist: {cfg.train_error_distribution})...")
     env = make_env(pretrain_prices, cfg.train_error_distribution, cfg.seed,
                    enable_reward_shaping=cfg.enable_reward_shaping,
                    flex_price_error_pct=cfg.flex_price_error_pct,
@@ -635,17 +696,33 @@ def train_ppo(
                    forecast_regime=cfg.forecast_regime)
     vec_env = DummyVecEnv([lambda: env])
 
+    # When warm-starting from BC, the fine-tuning phase must NOT use the
+    # standard exploration-heavy PPO hyperparameters, or it washes out the
+    # imitation policy: a randomly-initialised critic produces noisy
+    # advantages and the entropy bonus pushes the near-deterministic BC
+    # policy back toward uniform. We therefore reduce the entropy coefficient
+    # and the learning rate for the fine-tune. Because BC trains the policy
+    # via its own optimiser (in behavioural_cloning), these PPO
+    # hyperparameters only affect the fine-tuning phase, so setting them at
+    # construction time is correct.
+    if cfg.warm_start == "bc":
+        ft_lr = cfg.bc_finetune_lr if cfg.bc_finetune_lr > 0 else cfg.learning_rate * 0.1
+        ft_ent = cfg.bc_finetune_ent_coef
+    else:
+        ft_lr = cfg.learning_rate
+        ft_ent = cfg.ent_coef
+
     model = PPO(
         "MlpPolicy",
         vec_env,
-        learning_rate=cfg.learning_rate,
+        learning_rate=ft_lr,
         n_steps=2048,
         batch_size=64,
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=cfg.ent_coef,
+        ent_coef=ft_ent,
         vf_coef=0.5,
         max_grad_norm=0.5,
         verbose=1 if cfg.verbose else 0,
@@ -653,8 +730,78 @@ def train_ppo(
         seed=cfg.seed,
     )
 
+    # ------------------------------------------------------------------
+    # Block 6: behavioural-cloning warm-start (optional)
+    # ------------------------------------------------------------------
+    if cfg.warm_start == "bc":
+        if pretrain_services is None or battery_params is None or flex_market is None:
+            print("  WARNING: --warm-start bc requested but demonstration "
+                  "inputs are missing; falling back to random init.")
+        else:
+            from bc_pretraining import (collect_milp_demonstrations,
+                                        behavioural_cloning)
+            print("  [BC] Collecting MILP expert demonstrations...")
+            demos = collect_milp_demonstrations(
+                run_milp_day_fn=run_milp_day,
+                make_env_fn=make_env,
+                battery_params=battery_params,
+                flex_market=flex_market,
+                prices=list(pretrain_prices),
+                services=pretrain_services,
+                cfg=cfg,
+                train_error_distribution=cfg.train_error_distribution,
+                verbose=cfg.verbose,
+            )
+            print(f"  [BC] Supervised pretraining for {cfg.bc_epochs} epochs...")
+            bc_history = behavioural_cloning(
+                model, demos,
+                n_epochs=cfg.bc_epochs,
+                batch_size=cfg.bc_batch_size,
+                lr=cfg.bc_lr,
+                seed=cfg.seed,
+                verbose=cfg.verbose,
+            )
+            # Persist the BC learning curve for the paper's ablation figures
+            try:
+                import json as _json
+                with open(paths.comparison / "bc_history.json", "w") as f:
+                    _json.dump(bc_history, f, indent=2)
+            except Exception as e:
+                print(f"  [BC] could not save bc_history.json ({e})")
+            print(f"  [BC] Done. Final val accuracy "
+                  f"{bc_history['val_accuracy'][-1]:.3f}. "
+                  f"Fine-tuning with PPO...")
+
+    # Fine-tune budget semantics:
+    #   bc_finetune_timesteps < 0  -> use the standard pretrain budget
+    #   bc_finetune_timesteps == 0 -> SKIP fine-tuning (evaluate the pure BC
+    #                                 policy; diagnostic to check whether the
+    #                                 imitation alone is good, isolating it
+    #                                 from any fine-tuning washout)
+    #   bc_finetune_timesteps > 0  -> use exactly that many timesteps
+    if cfg.warm_start == "bc" and cfg.bc_finetune_timesteps == 0:
+        print("  [BC] Fine-tuning skipped (--bc-finetune-timesteps 0): "
+              "evaluating the pure behavioural-cloning policy.")
+        run_model_path = paths.models / "main_ppo_pretrained.zip"
+        model.save(str(run_model_path))
+        Path(cfg.model_path).parent.mkdir(parents=True, exist_ok=True)
+        model.save(cfg.model_path)
+        print(f"  BC-only model saved to {run_model_path}")
+        return str(run_model_path)
+
+    if cfg.bc_finetune_timesteps > 0:
+        finetune_steps = cfg.bc_finetune_timesteps
+    else:
+        finetune_steps = cfg.pretrain_timesteps
+    label = ("BC + PPO fine-tune" if cfg.warm_start == "bc"
+             else "PPO pretraining")
+    extra = (f" [reduced lr={ft_lr:.1e}, ent_coef={ft_ent}]"
+             if cfg.warm_start == "bc" else "")
+    print(f"  {label} for {finetune_steps:,} timesteps "
+          f"(error dist: {cfg.train_error_distribution}){extra}...")
+
     t0 = time.time()
-    model.learn(total_timesteps=cfg.pretrain_timesteps)
+    model.learn(total_timesteps=finetune_steps)
     train_time = time.time() - t0
 
     # Save both to the run directory and to the user-specified model_path
@@ -663,7 +810,7 @@ def train_ppo(
     Path(cfg.model_path).parent.mkdir(parents=True, exist_ok=True)
     model.save(cfg.model_path)
 
-    print(f"  Pretraining done in {train_time/60:.1f} minutes. Model saved to {run_model_path}")
+    print(f"  Training done in {train_time/60:.1f} minutes. Model saved to {run_model_path}")
     return str(run_model_path)
 
 
@@ -808,6 +955,12 @@ def run_milp_day(
         # activations explicitly so run_annual_comparison can aggregate
         # the full throughput symmetrically with the PPO side.
         "flexibility_activations": result.flexibility_activations,
+        # Per-service realized flexibility revenue (capacity + expected
+        # activation energy), computed inside the optimizer with the same
+        # formula as the total flexibility_revenue, so the three entries
+        # sum exactly to flexibility_revenue (and hence to net profit).
+        # Replaces the previous approximate compute_milp_service_breakdown.
+        "flexibility_revenue_by_service": result.flexibility_revenue_by_service,
     }
 
 
@@ -1032,9 +1185,18 @@ def run_annual_comparison(
             ppo_res = run_ppo_day(current_model, daily_prices,
                                   daily_services, cfg, eval_distribution=dist)
 
-            milp_breakdown = compute_milp_service_breakdown(
-                milp_res["flexibility_reservations"], daily_services
-            )
+            # Per-service MILP revenue: use the exact realized breakdown
+            # returned by the optimizer (capacity + expected activation energy,
+            # consistent with the total flexibility_revenue). The previous
+            # approximate helper compute_milp_service_breakdown used a static
+            # 0.5 activation factor that did not sum to the net profit and is
+            # no longer used here. We keep a defensive fallback in case an
+            # older optimizer result without the field is encountered.
+            milp_breakdown = milp_res.get("flexibility_revenue_by_service")
+            if not milp_breakdown:
+                milp_breakdown = compute_milp_service_breakdown(
+                    milp_res["flexibility_reservations"], daily_services
+                )
             # ----------------------------------------------------------------
             # Throughput accounting fix
             # ----------------------------------------------------------------
@@ -1389,7 +1551,10 @@ def main() -> int:
     ppo_model: Optional["PPO"] = None
     if cfg.mode != "compare" and not cfg.skip_train and cfg.pretrain_months > 0:
         print("\n[2/4] Pretraining PPO...")
-        train_ppo(cfg, paths, market["pretrain_prices"])
+        train_ppo(cfg, paths, market["pretrain_prices"],
+                  pretrain_services=market.get("pretrain_services"),
+                  battery_params=build_battery_params(cfg),
+                  flex_market=market.get("flex_market"))
 
     if cfg.mode == "train":
         print("\nTraining-only mode finished. Skipping comparison.")
@@ -1456,6 +1621,7 @@ def main() -> int:
 
     print(f"\nAll outputs saved under: {paths.root.resolve()}")
     return 0
+
 
 if __name__ == "__main__":
     try:
