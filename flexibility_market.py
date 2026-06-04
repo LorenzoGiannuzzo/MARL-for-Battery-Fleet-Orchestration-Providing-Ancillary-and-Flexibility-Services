@@ -40,6 +40,16 @@ class FlexibilityService:
     # Realized settlement prices (used to compute realized payment ex-post)
     true_capacity_price: Optional[float] = None  # EUR/MW/h - true settlement price
     true_energy_price: Optional[float] = None    # EUR/MWh  - true settlement price
+    # June 2026: hourly probability that a bid for this service WINS the
+    # capacity auction. Models the fact that the BSP does not always succeed
+    # in clearing the aFRR/FCR/mFRR auction: the bid is made (and the
+    # capacity is committed) every hour the optimiser decides to participate,
+    # but only with probability `award_probability` is the bid actually
+    # accepted and the corresponding revenue paid. When the bid is rejected,
+    # no capacity or energy revenue accrues for that hour, even though the
+    # decision committed power that could have been used for arbitrage.
+    # Default 1.0 reproduces the legacy "always-wins" behaviour.
+    award_probability: float = 1.0
 
     def __post_init__(self):
         """Validate service parameters according to ARERA regulations"""
@@ -223,6 +233,16 @@ class FlexibilityMarket:
                 fc_capacity = true_capacity
                 fc_energy = true_energy
 
+            # Award probability: hour-of-day pattern reflecting demand for
+            # ancillary services on the Italian balancing market.
+            # Night hours (1-5): system stable, few bidders compete, award_prob high
+            # Peak hours (18-21): system stressed, many bidders compete, award_prob low
+            # Mid-day / off-peak: intermediate.
+            # FCR (high-value, fastest service) is the most competitive -> lowest awards.
+            # mFRR (slowest, lower-value) is the least competitive -> highest awards.
+            award_prob = self._compute_award_probability(hour, day_of_week,
+                                                          service_type)
+
             service = FlexibilityService(
                 service_type=service_type,
                 capacity_price=fc_capacity,        # FORECAST (visible to optimizer)
@@ -234,11 +254,58 @@ class FlexibilityMarket:
                 min_duration=tariff['min_duration'],
                 true_capacity_price=true_capacity,  # TRUE settlement price
                 true_energy_price=true_energy,      # TRUE settlement price
+                award_probability=award_prob,
             )
 
             opportunities.append(service)
 
         return opportunities
+
+    def _compute_award_probability(self, hour: int, day_of_week: int,
+                                    service_type: 'ServiceType') -> float:
+        """Hourly probability that a bid for `service_type` is accepted.
+
+        Pattern is intentionally simple and reproducible: a piecewise hourly
+        profile shifted per service to reflect competitive intensity.
+
+          Hour band       Base level
+          ----------      ----------
+          00-05 (night)   0.80   (low demand, high acceptance)
+          06-09 (ramp)    0.55
+          10-15 (midday)  0.65
+          16-17 (rise)    0.45
+          18-21 (peak)    0.30   (high demand, low acceptance)
+          22-23 (settle)  0.60
+
+        Service offset (added to the base level, clipped to [0.05, 0.95]):
+          FCR  : -0.15   (most competitive, hardest to win)
+          aFRR :  0.00   (reference)
+          mFRR : +0.10   (least competitive, easiest to win)
+
+        Weekend factor: +0.05 (slightly easier to win on weekends, less
+        industrial load creates less ancillary demand pressure).
+        """
+        if 0 <= hour <= 5:
+            base = 0.80
+        elif 6 <= hour <= 9:
+            base = 0.55
+        elif 10 <= hour <= 15:
+            base = 0.65
+        elif 16 <= hour <= 17:
+            base = 0.45
+        elif 18 <= hour <= 21:
+            base = 0.30
+        else:  # 22-23
+            base = 0.60
+
+        offset = {
+            ServiceType.FCR:  -0.15,
+            ServiceType.AFRR:  0.00,
+            ServiceType.MFRR: +0.10,
+        }[service_type]
+
+        weekend_bonus = 0.05 if day_of_week >= 5 else 0.0
+        return float(np.clip(base + offset + weekend_bonus, 0.05, 0.95))
 
     def calculate_capacity_revenue(self, service: FlexibilityService, capacity_mw: float) -> float:
         """

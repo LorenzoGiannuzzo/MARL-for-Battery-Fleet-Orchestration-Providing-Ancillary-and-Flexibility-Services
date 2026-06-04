@@ -402,27 +402,30 @@ class MILPOptimizer:
             services = flexibility_services[t]
 
             for service in services:
+                # June 2026: capacity auctions are not guaranteed to clear.
+                # Each per-hour service has an `award_probability` in [0,1]
+                # that scales the EXPECTED capacity and energy revenue. The
+                # capacity-balance constraints remain binding always (the bid
+                # commits the power) so the MILP must trade off the expected
+                # service revenue against the certain arbitrage opportunity
+                # foregone by reserving the capacity.
+                aw = service.award_probability
                 if service.service_type == ServiceType.FCR:
-                    # Capacity revenue (guaranteed payment for reserving capacity)
-                    capacity_revenue = variables['R_fcr'][t] * service.capacity_price
-
-                    # Expected energy revenue (probabilistic payment when activated)
-                    # Using expected value: activation_probability * energy_price * energy_provided
+                    capacity_revenue = variables['R_fcr'][t] * service.capacity_price * aw
                     energy_revenue = (variables['A_fcr'][t] * service.energy_price *
-                                      service.activation_probability)
-
+                                      service.activation_probability * aw)
                     objective += capacity_revenue + energy_revenue
 
                 elif service.service_type == ServiceType.AFRR:
-                    capacity_revenue = variables['R_afrr'][t] * service.capacity_price
+                    capacity_revenue = variables['R_afrr'][t] * service.capacity_price * aw
                     energy_revenue = (variables['A_afrr'][t] * service.energy_price *
-                                      service.activation_probability)
+                                      service.activation_probability * aw)
                     objective += capacity_revenue + energy_revenue
 
                 elif service.service_type == ServiceType.MFRR:
-                    capacity_revenue = variables['R_mfrr'][t] * service.capacity_price
+                    capacity_revenue = variables['R_mfrr'][t] * service.capacity_price * aw
                     energy_revenue = (variables['A_mfrr'][t] * service.energy_price *
-                                      service.activation_probability)
+                                      service.activation_probability * aw)
                     objective += capacity_revenue + energy_revenue
 
             # ==================== BATTERY DEGRADATION COST ====================
@@ -582,25 +585,30 @@ class MILPOptimizer:
                 true_en = (service.true_energy_price
                            if service.true_energy_price is not None
                            else service.energy_price)
+                # June 2026: capacity bids may not clear. The REALIZED MILP
+                # revenue (used to compute flexibility_revenue and the
+                # per-service breakdown) is the expected value over the
+                # auction outcome, consistent with the MILP objective.
+                aw = service.award_probability
 
                 if service.service_type == ServiceType.FCR:
-                    capacity_rev = variables['R_fcr'][t].varValue * true_cap
+                    capacity_rev = variables['R_fcr'][t].varValue * true_cap * aw
                     energy_rev = (variables['A_fcr'][t].varValue * true_en *
-                                  service.activation_probability)
+                                  service.activation_probability * aw)
                     flexibility_revenue += capacity_rev + energy_rev
                     flex_rev_by_service['FCR'] += capacity_rev + energy_rev
 
                 elif service.service_type == ServiceType.AFRR:
-                    capacity_rev = variables['R_afrr'][t].varValue * true_cap
+                    capacity_rev = variables['R_afrr'][t].varValue * true_cap * aw
                     energy_rev = (variables['A_afrr'][t].varValue * true_en *
-                                  service.activation_probability)
+                                  service.activation_probability * aw)
                     flexibility_revenue += capacity_rev + energy_rev
                     flex_rev_by_service['aFRR'] += capacity_rev + energy_rev
 
                 elif service.service_type == ServiceType.MFRR:
-                    capacity_rev = variables['R_mfrr'][t].varValue * true_cap
+                    capacity_rev = variables['R_mfrr'][t].varValue * true_cap * aw
                     energy_rev = (variables['A_mfrr'][t].varValue * true_en *
-                                  service.activation_probability)
+                                  service.activation_probability * aw)
                     flexibility_revenue += capacity_rev + energy_rev
                     flex_rev_by_service['mFRR'] += capacity_rev + energy_rev
 

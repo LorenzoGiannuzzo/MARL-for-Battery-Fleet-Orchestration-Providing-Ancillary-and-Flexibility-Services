@@ -365,7 +365,23 @@ class ExtendedBatteryTradingEnv(gym.Env):
             if reserved_capacity > 0 and service_type in service_dict:
                 service = service_dict[service_type]
 
-                # Capacity revenue (guaranteed)
+                # June 2026: stochastic capacity auction outcome. The agent
+                # has committed `reserved_capacity` MW to this service for
+                # the hour (the capacity-balance constraint already locked
+                # the power), but the bid is only awarded with probability
+                # `service.award_probability`. When the bid is rejected,
+                # the agent collects neither capacity nor activation revenue
+                # for this hour from this service, but the reserved capacity
+                # is still off the table for arbitrage (the conflict-
+                # resolution scaling has already been applied above). This
+                # makes the bid a real economic gamble.
+                bid_won = (np.random.random() < service.award_probability)
+                if not bid_won:
+                    # Zero out reservation downstream: no capacity revenue,
+                    # no activation, no activation throughput. Skip to next.
+                    continue
+
+                # Capacity revenue (guaranteed conditional on award)
                 capacity_revenue = self.flexibility_market.calculate_capacity_revenue(
                     service, reserved_capacity
                 )
