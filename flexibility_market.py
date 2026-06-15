@@ -11,9 +11,19 @@ import numpy as np
 
 class ServiceType(Enum):
     """Italian flexibility service types according to ARERA"""
-    FCR = "FCR"      # Frequency Containment Reserve (Primary)
-    AFRR = "aFRR"    # Automatic Frequency Restoration Reserve (Secondary)
-    MFRR = "mFRR"    # Manual Frequency Restoration Reserve (Tertiary)
+    FCR = "FCR"          # Frequency Containment Reserve (Primary, symmetric)
+    AFRR = "aFRR"        # legacy symmetric aFRR (kept for back-compat)
+    MFRR = "mFRR"        # legacy symmetric mFRR (kept for back-compat)
+    AFRR_UP = "aFRR_up"  # aFRR upward (BSP discharges on activation)
+    AFRR_DN = "aFRR_dn"  # aFRR downward (BSP charges on activation)
+    MFRR_UP = "mFRR_up"  # mFRR upward
+    MFRR_DN = "mFRR_dn"  # mFRR downward
+
+
+# Helper sets for direction-aware logic
+DIRECTIONAL_SERVICES_UP = {ServiceType.AFRR_UP, ServiceType.MFRR_UP}
+DIRECTIONAL_SERVICES_DN = {ServiceType.AFRR_DN, ServiceType.MFRR_DN}
+DIRECTIONAL_SERVICES = DIRECTIONAL_SERVICES_UP | DIRECTIONAL_SERVICES_DN
 
 
 @dataclass
@@ -56,10 +66,10 @@ class FlexibilityService:
         if self.service_type == ServiceType.FCR:
             assert self.response_time <= 30, "FCR response time must be \u2264 30 seconds"
             assert self.min_capacity >= 1.0, "FCR minimum capacity is 1 MW"
-        elif self.service_type == ServiceType.AFRR:
+        elif self.service_type in (ServiceType.AFRR, ServiceType.AFRR_UP, ServiceType.AFRR_DN):
             assert self.response_time <= 200, "aFRR response time must be \u2264 200 seconds"
             assert self.min_capacity >= 1.0, "aFRR minimum capacity is 1 MW"
-        elif self.service_type == ServiceType.MFRR:
+        elif self.service_type in (ServiceType.MFRR, ServiceType.MFRR_UP, ServiceType.MFRR_DN):
             assert self.response_time <= 900, "mFRR response time must be \u2264 15 minutes"
             assert self.min_capacity >= 1.0, "mFRR minimum capacity is 1 MW"
 

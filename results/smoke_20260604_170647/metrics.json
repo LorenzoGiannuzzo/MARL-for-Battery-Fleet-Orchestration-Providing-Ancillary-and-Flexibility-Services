@@ -1,0 +1,48 @@
+{
+  "run_id": "smoke_20260604_170647",
+  "scale": "smoke",
+  "use_nonlinear_degradation": false,
+  "n_batteries": 3,
+  "train_days": 7,
+  "test_days": 3,
+  "timing": {
+    "total_seconds": 3.394106864929199,
+    "demo_generation_seconds": 0.9392709732055664,
+    "bc_training_seconds": 1.960747480392456,
+    "evaluation_seconds": 0.4887678623199463
+  },
+  "train": {
+    "total_milp_profit_eur": 65442.137408366434,
+    "optimal_day_count": 7
+  },
+  "bc": {
+    "dataset_size": 504,
+    "final_train_loss": 0.01646928399871001,
+    "final_val_accuracy_per_axis": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ]
+  },
+  "test": {
+    "milp_oracle_total_eur": 39637.5,
+    "bc_policy_total_eur": 39637.50000000001,
+    "random_baseline_total_eur": 10540.90151084297,
+    "milp_daily_profits": [
+      17725.0,
+      10287.5,
+      11625.0
+    ],
+    "bc_daily_profits": [
+      17725.000000000004,
+      10287.5,
+      11625.000000000002
+    ]
+  },
+  "headline": {
+    "bc_gap_to_milp_percent": -1.8356247528687293e-14,
+    "bc_uplift_over_random_factor": 3.760351992590636
+  }
+}

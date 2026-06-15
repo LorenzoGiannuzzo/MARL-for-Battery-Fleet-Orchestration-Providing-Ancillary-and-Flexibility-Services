@@ -1,0 +1,62 @@
+{
+  "run_id": "medium_20260604_170928",
+  "scale": "medium",
+  "use_nonlinear_degradation": false,
+  "n_batteries": 10,
+  "train_days": 30,
+  "test_days": 10,
+  "timing": {
+    "total_seconds": 28.010162115097046,
+    "demo_generation_seconds": 7.723692417144775,
+    "bc_training_seconds": 15.394413709640503,
+    "evaluation_seconds": 2.819880247116089
+  },
+  "train": {
+    "total_milp_profit_eur": 777029.7685558704,
+    "optimal_day_count": 30
+  },
+  "bc": {
+    "dataset_size": 7200,
+    "final_train_loss": 0.016327872028700823,
+    "final_val_accuracy_per_axis": [
+      0.9916666666666667,
+      0.9944444444444445,
+      1.0,
+      0.9819444444444444,
+      1.0
+    ]
+  },
+  "test": {
+    "milp_oracle_total_eur": 267508.4929333333,
+    "bc_policy_total_eur": 273269.4000000001,
+    "random_baseline_total_eur": 107757.03621225432,
+    "milp_daily_profits": [
+      59083.33333333334,
+      31069.666666666664,
+      28073.2,
+      17615.0,
+      25826.593333333334,
+      19475.0,
+      14216.666666666668,
+      26791.66666666667,
+      27974.000000000004,
+      17383.366266666668
+    ],
+    "bc_daily_profits": [
+      59083.33333333342,
+      31069.666666666675,
+      28073.199999999968,
+      17615.00000000001,
+      29731.66666666665,
+      19475.000000000004,
+      14216.666666666672,
+      26791.66666666665,
+      27974.00000000003,
+      19239.20000000001
+    ]
+  },
+  "headline": {
+    "bc_gap_to_milp_percent": -2.153541744972728,
+    "bc_uplift_over_random_factor": 2.535977320884438
+  }
+}

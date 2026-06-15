@@ -1,0 +1,89 @@
+{
+  "run_id": "smoke_20260612_110132",
+  "scale": "smoke",
+  "use_nonlinear_degradation": false,
+  "n_batteries": 3,
+  "train_days": 7,
+  "test_days": 3,
+  "timing": {
+    "total_seconds": 21343.82954120636,
+    "demo_generation_seconds": 3.2444794178009033,
+    "bc_training_seconds": 8.016746520996094,
+    "evaluation_seconds": 21328.4132668972
+  },
+  "train": {
+    "total_milp_profit_eur": 57269.79771907908,
+    "optimal_day_count": 7
+  },
+  "bc": {
+    "dataset_size": 504,
+    "final_train_loss": 1.2791365768415812,
+    "final_val_accuracy_per_axis": [
+      1.0,
+      0.42,
+      1.0,
+      1.0,
+      0.4,
+      1.0,
+      1.0
+    ]
+  },
+  "test": {
+    "milp_objective_continuous_eur": 25605.608662243303,
+    "milp_oracle_total_eur": 11344.620808667449,
+    "bc_policy_total_eur": 14170.079454090164,
+    "ppo_vanilla_total_eur": 4948.940065339963,
+    "ppo_bc_warmstart_total_eur": 1033.4763241677858,
+    "random_baseline_total_eur": 1540.1959265275882,
+    "milp_daily_profits": [
+      6276.605755739716,
+      3040.25012973843,
+      2027.7649231893024
+    ],
+    "bc_daily_profits": [
+      6199.757330226553,
+      6361.356536972333,
+      1608.965586891279
+    ],
+    "ppo_vanilla_daily_profits": [
+      1057.2292421793115,
+      450.08935576441075,
+      3441.621467396241
+    ],
+    "ppo_bc_warmstart_daily_profits": [
+      62.50000000000001,
+      34.61538461538461,
+      936.3609395524013
+    ],
+    "decomposition": {
+      "milp_realised": {
+        "arbitrage": 11344.620808667449,
+        "note": "MILP env-realised total only; per-service split not tracked"
+      },
+      "bc": {
+        "arbitrage": 3098.21376615,
+        "flex": 11262.11568794016,
+        "degradation": 190.25
+      },
+      "random": {
+        "arbitrage": -1021.4415852844337,
+        "flex": 2783.076336232839,
+        "degradation": 221.43882442081613
+      },
+      "ppo_vanilla": {
+        "arbitrage": -476.22843532942056,
+        "flex": 5517.12710586627,
+        "degradation": 91.95860519688642
+      },
+      "ppo_bc": {
+        "arbitrage": 303.86473757500005,
+        "flex": 740.7095032594525,
+        "degradation": 11.097916666666668
+      }
+    }
+  },
+  "headline": {
+    "bc_gap_to_milp_percent": -24.90571252292563,
+    "bc_uplift_over_random_factor": 9.20017980182364
+  }
+}
