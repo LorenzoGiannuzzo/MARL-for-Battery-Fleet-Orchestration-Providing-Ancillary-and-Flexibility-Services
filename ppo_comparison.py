@@ -158,8 +158,14 @@ def train_ppo_policy(
                   f"({len(info['skipped'])} saltati)")
         # sanity check: la policy PPO appena trasferita deve riprodurre il BC
         try:
+            # Use the BC net's OWN input dimension, not the module constant
+            # OBS_DIM. With full_foresight the observation is 410-dim, so a
+            # fixed OBS_DIM=26 here builds the wrong-shaped probe and the check
+            # fails with a shape-mismatch ("1x26 and 410x512") even though the
+            # transfer itself was fine. bc_net.obs_dim is always correct.
             from multi_bess_env import OBS_DIM
-            obs_samples = np.random.uniform(-1, 1, size=(256, OBS_DIM)).astype(np.float32)
+            probe_dim = int(getattr(bc_net, "obs_dim", OBS_DIM))
+            obs_samples = np.random.uniform(-1, 1, size=(256, probe_dim)).astype(np.float32)
             vt = verify_transfer(bc_net, algo, SHARED_POLICY_ID, obs_samples)
             if verbose:
                 print(f"  [ppo] verify_transfer: {vt}")
