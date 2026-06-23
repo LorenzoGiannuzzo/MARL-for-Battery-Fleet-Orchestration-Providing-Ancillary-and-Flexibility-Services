@@ -270,12 +270,28 @@ class MultiBESSEnv(ParallelEnv):
             getattr(self, "commitment_lead_time", 24))
         self.penalty_k: float = float(
             getattr(self, "penalty_k", DEFAULT_PENALTY_K))
+        # Cure 1+2: immediate per-hour penalty on RAW overcommit (bids beyond
+        # available power, measured pre-clip as a fraction of P_max). Default
+        # 0.0 = OFF. When > 0, step() subtracts overcommit_penalty * excess *
+        # P_max from each agent's reward in the same hour it overcommits. MILP
+        # and BC never overcommit, so their penalty is always 0 (fair).
+        self.overcommit_penalty: float = float(
+            getattr(self, "overcommit_penalty", 0.0))
         self._commitments: CommitmentTable = CommitmentTable(
             list(self.possible_agents))
 
     # ------------------------------------------------------------------
     # PettingZoo required: per-agent space queries
     # ------------------------------------------------------------------
+
+    def configure_overcommit_penalty(self, coeff: float = 0.0):
+        """Set the immediate overcommit penalty coefficient (Cure 1+2).
+        0.0 disables it (default). When > 0, each agent is charged
+        coeff * overcommit_excess_fraction * P_max in the same hour it bids
+        beyond available power. Returns self.
+        """
+        self.overcommit_penalty = float(coeff)
+        return self
 
     def configure_commitments(self, enable: bool = True,
                               lead_time: int = 24, penalty_k: float = 1.5):
@@ -375,6 +391,7 @@ class MultiBESSEnv(ParallelEnv):
         rewards: Dict[str, float] = {}
         per_agent_arb: Dict[str, float] = {}
         per_agent_deg: Dict[str, float] = {}
+        per_agent_overcommit_pen: Dict[str, float] = {}
         per_agent_flex: Dict[str, float] = {a: 0.0 for a in self.agents}
         per_agent_throughput: Dict[str, float] = {}
 
@@ -685,7 +702,17 @@ class MultiBESSEnv(ParallelEnv):
                     pass
 
             per_agent_deg[a] = deg
-            rewards[a] = per_agent_arb[a] + per_agent_flex[a] - deg
+            # Cure 1+2: immediate per-hour penalty on raw overcommit. The excess
+            # (fraction of P_max bid beyond available power, captured pre-clip)
+            # is converted to power-equivalent and charged at the configured
+            # coefficient. Zero when overcommit_penalty == 0 (default) or when
+            # the agent did not overcommit (always so for MILP/BC), keeping the
+            # cross-policy comparison fair — only saturating policies pay.
+            oc_excess = per_agent[a].get('overcommit', 0.0)
+            bp_a = self.multi_params.batteries[self.agent_name_mapping[a]]
+            oc_pen = self.overcommit_penalty * oc_excess * bp_a.max_power_mw
+            per_agent_overcommit_pen[a] = oc_pen
+            rewards[a] = per_agent_arb[a] + per_agent_flex[a] - deg - oc_pen
 
         # ---- Advance hour ----
         self._hour += 1
@@ -810,6 +837,12 @@ class MultiBESSEnv(ParallelEnv):
                 # the mechanism that penalises over-committing.
                 total = (P_ch + P_dis + R_fcr
                          + R_afrr_up + R_afrr_dn + R_mfrr_up + R_mfrr_dn)
+                # Cure 2: record the RAW overcommit excess (before scaling),
+                # normalised by P_max. A reward penalty proportional to this is
+                # applied in step(), giving an IMMEDIATE, attributable signal
+                # against saturating all axes — the gradient that the mere
+                # proportional rescale below does NOT provide.
+                overcommit_excess = max(0.0, total - P_free) / max(P_max, 1e-9)
                 if total > P_free and total > 0:
                     scale = P_free / total
                     P_ch *= scale; P_dis *= scale; R_fcr *= scale
@@ -854,6 +887,7 @@ class MultiBESSEnv(ParallelEnv):
                     'P_charge': P_ch, 'P_discharge': P_dis, 'R_fcr': R_fcr,
                     'R_afrr_up': R_afrr_up, 'R_afrr_dn': R_afrr_dn,
                     'R_mfrr_up': R_mfrr_up, 'R_mfrr_dn': R_mfrr_dn,
+                    'overcommit': overcommit_excess,
                 }
                 continue
 
@@ -863,6 +897,7 @@ class MultiBESSEnv(ParallelEnv):
                 if P_ch >= P_dis: P_dis = 0.0
                 else: P_ch = 0.0
             total = P_ch + P_dis + R_fcr + R_afrr + R_mfrr
+            overcommit_excess = max(0.0, total - P_free) / max(P_max, 1e-9)
             if total > P_free and total > 0:
                 scale = P_free / total
                 P_ch *= scale; P_dis *= scale
@@ -874,6 +909,7 @@ class MultiBESSEnv(ParallelEnv):
             out[a] = {
                 'P_charge': P_ch, 'P_discharge': P_dis,
                 'R_fcr': R_fcr, 'R_afrr': R_afrr, 'R_mfrr': R_mfrr,
+                'overcommit': overcommit_excess,
             }
         return out
 
