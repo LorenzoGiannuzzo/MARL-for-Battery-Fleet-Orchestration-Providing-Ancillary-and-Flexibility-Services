@@ -85,11 +85,46 @@ def _decode_action_to_fractions(action: np.ndarray) -> np.ndarray:
     return _BIN_VALUES[np.asarray(action, dtype=np.int64)]
 
 
+# Mapping between env action-axis service KEYS ('R_fcr', ...) and ServiceType,
+# used by the commitment path (Steps C/D) to register and settle commitments.
+_KEY_TO_ST = {
+    'R_fcr': ServiceType.FCR,
+    'R_afrr': ServiceType.AFRR, 'R_mfrr': ServiceType.MFRR,
+    'R_afrr_up': ServiceType.AFRR_UP, 'R_afrr_dn': ServiceType.AFRR_DN,
+    'R_mfrr_up': ServiceType.MFRR_UP, 'R_mfrr_dn': ServiceType.MFRR_DN,
+}
+_ST_TO_KEY = {v: k for k, v in _KEY_TO_ST.items()}
+
+# Fixed ordering of the 5 directional service axes, used to lay out the
+# pending-commitment observation features (obs[21:26]) deterministically.
+# These are the actual flexibility services (charge/discharge are arbitrage,
+# not services, so they are excluded).
+_ORDERED_SERVICE_KEYS = [
+    'R_fcr', 'R_afrr_up', 'R_afrr_dn', 'R_mfrr_up', 'R_mfrr_dn',
+]
+
+
+def _service_key_for(st: "ServiceType") -> str:
+    return _ST_TO_KEY[st]
+
+
+def _service_type_for(key: str) -> "ServiceType":
+    return _KEY_TO_ST[key]
+
+
 # ============================================================================
 # Observation packing
 # ============================================================================
 
-OBS_DIM = 21  # see _build_observation for the schema
+OBS_DIM = 26  # see _build_observation for the schema
+# 21 base features + 5 pending-commitment features (one per directional service:
+# FCR, aFRR up/dn, mFRR up/dn). The 5 extra features expose how much capacity the
+# agent has ALREADY committed for delivery in the near future, per service. This
+# is the bridge that lets the PPO connect a day-ahead bid to its eventual
+# activation: the commitment persists in the observation between bid and
+# delivery, restoring the Markov property that the 24h lead otherwise breaks.
+# With commitments disabled these 5 features are always zero (legacy behaviour
+# preserved bit-for-bit except for the larger, zero-padded observation vector).
 
 
 # ============================================================================
@@ -213,9 +248,59 @@ class MultiBESSEnv(ParallelEnv):
         self._rng: np.random.Generator = np.random.default_rng(seed)
         self._last_info: Dict[str, Any] = {}
 
+        # ---- Realistic market model (Steps A-D): commitment table ----
+        # When enable_commitments=True, awarded bids freeze battery power for
+        # their delivery hours (capacity locking), instead of every hour being
+        # an isolated auction. See commitments.py for the data structure and
+        # the design rationale (day-ahead rolling, hourly lock, k=1.5 penalty).
+        # Default False keeps the legacy single-hour behaviour bit-identical,
+        # so existing runs are unaffected until the feature is switched on.
+        from commitments import CommitmentTable, DEFAULT_PENALTY_K
+        self.enable_commitments: bool = bool(
+            getattr(self, "enable_commitments", False))
+        # Day-ahead rolling lead time for SERVICE bids only: a service bid
+        # decided at hour t is for delivery at hour (t + lead_time) wrapped into
+        # the 24h episode, i.e. (t + lead_time) % episode_hours. Arbitrage
+        # (charge/discharge) executes immediately at t (energy near-real-time);
+        # only the MSD service reservations are bid a day ahead. Default 24h
+        # reflects the real MSD ex-ante (bids placed the day before delivery).
+        # The modulo wrap keeps deliveries inside the 24h episode while
+        # preserving the full-day lead structure and the 7-axis action space.
+        self.commitment_lead_time: int = int(
+            getattr(self, "commitment_lead_time", 24))
+        self.penalty_k: float = float(
+            getattr(self, "penalty_k", DEFAULT_PENALTY_K))
+        self._commitments: CommitmentTable = CommitmentTable(
+            list(self.possible_agents))
+
     # ------------------------------------------------------------------
     # PettingZoo required: per-agent space queries
     # ------------------------------------------------------------------
+
+    def configure_commitments(self, enable: bool = True,
+                              lead_time: int = 24, penalty_k: float = 1.5):
+        """Enable/parameterise the realistic commitment market model.
+
+        Call AFTER construction (and before reset) to switch on Steps A-D:
+        day-ahead rolling bids, capacity locking, deferred activation, and the
+        non-delivery penalty. Returns self for chaining.
+
+        Parameters
+        ----------
+        enable : bool
+            If False, the env behaves exactly as the legacy single-hour
+            auction (bit-identical), which is the default.
+        lead_time : int
+            Hours between a service bid and its delivery, wrapped modulo the
+            episode length. 24 = day-ahead.
+        penalty_k : float
+            Non-delivery penalty multiplier (undelivered energy is charged
+            penalty_k * energy_price). 1.5 by default.
+        """
+        self.enable_commitments = bool(enable)
+        self.commitment_lead_time = int(lead_time)
+        self.penalty_k = float(penalty_k)
+        return self
 
     def observation_space(self, agent: str) -> spaces.Space:
         return self._observation_space
@@ -236,6 +321,7 @@ class MultiBESSEnv(ParallelEnv):
         self.agents = self.possible_agents.copy()
         self._hour = 0
         self._socs = np.full(self.n_agents, self.soc_init, dtype=np.float64)
+        self._commitments.reset(list(self.possible_agents))
         self._lfp_states = []
         for i, bp in enumerate(self.multi_params.batteries):
             s = LFPBatteryState(capacity_mwh=bp.capacity_mwh)
@@ -277,8 +363,13 @@ class MultiBESSEnv(ParallelEnv):
         services_now = self._services_episode[t]
         services_by_type = {s.service_type: s for s in services_now}
 
+        # STEP B: drop commitments whose delivery window has passed, so
+        # locked_power(t) reflects only currently-active commitments.
+        if self.enable_commitments:
+            self._commitments.expire(t)
+
         # ---- Decode and clip per-agent actions ----
-        per_agent = self._decode_clip_actions(actions)
+        per_agent = self._decode_clip_actions(actions, hour=t)
 
         # ---- Per-agent SOC dynamics from arbitrage (services applied later) ----
         rewards: Dict[str, float] = {}
@@ -365,49 +456,152 @@ class MultiBESSEnv(ParallelEnv):
         # recording and per-policy decomposition charts.
         per_service_revenue: Dict["ServiceType", float] = {}
 
-        for st in service_types:
-            s = services_by_type.get(st)
-            if s is None or agg_bids[st] < 1.0:
-                continue
-            # Award rule:
-            #  - FCR: independent Bernoulli (symmetric, always-on)
-            #  - Directional (aFRR/mFRR up/dn): pre-decided by the categorical
-            #    draw above. The award_probability is already embedded in the
-            #    categorical decision (P_up_excl, P_dn_excl).
-            #  - Legacy non-directional: simple Bernoulli per service.
-            if directional_awarded_services is not None and st != ServiceType.FCR:
-                awarded = st in directional_awarded_services
-            else:
-                awarded = self._rng.random() < s.award_probability
-            if not awarded:
-                continue
-            total_cap_payment = s.capacity_price * agg_bids[st]
-            activated = self._rng.random() < s.activation_probability
-            total_energy_payment = (s.energy_price * agg_bids[st]) if activated else 0.0
-            direction = service_directions[st]
-            # Track aggregated revenue this service contributes this hour
-            per_service_revenue[st] = total_cap_payment + total_energy_payment
+        if not self.enable_commitments:
+            # =============== LEGACY PATH (single-hour auction) ===============
+            # Unchanged: bid, award, activation and payment all resolve in the
+            # same hour t. Kept bit-identical for backward compatibility.
+            for st in service_types:
+                s = services_by_type.get(st)
+                if s is None or agg_bids[st] < 1.0:
+                    continue
+                if directional_awarded_services is not None and st != ServiceType.FCR:
+                    awarded = st in directional_awarded_services
+                else:
+                    awarded = self._rng.random() < s.award_probability
+                if not awarded:
+                    continue
+                total_cap_payment = s.capacity_price * agg_bids[st]
+                activated = self._rng.random() < s.activation_probability
+                total_energy_payment = (s.energy_price * agg_bids[st]) if activated else 0.0
+                direction = service_directions[st]
+                per_service_revenue[st] = total_cap_payment + total_energy_payment
 
+                for a in self.agents:
+                    share = (per_agent_bid[a][st] / agg_bids[st]
+                              if agg_bids[st] > 0 else 0.0)
+                    per_agent_flex[a] += share * (total_cap_payment + total_energy_payment)
+                    if activated:
+                        i = self.agent_name_mapping[a]
+                        bp = self.multi_params.batteries[i]
+                        cap = bp.capacity_mwh
+                        eff = bp.efficiency
+                        activated_mwh = per_agent_bid[a][st]
+                        flex_throughput_per_agent[a] += activated_mwh
+                        if direction == 'up':
+                            per_agent_dsoc_act[a] -= activated_mwh / (eff * cap)
+                        elif direction == 'dn':
+                            per_agent_dsoc_act[a] += (eff * activated_mwh) / cap
+        else:
+            # =============== COMMITMENT PATH (Steps C + D) ===================
+            # Two temporally separated flows happen in hour t:
+            #
+            #  (C) BID @ t: the service bids decoded this hour are NOT delivered
+            #      now. For each, draw the award; if won, pay the CAPACITY
+            #      payment immediately (you are paid for being committed) and
+            #      register a Commitment for delivery at (t + lead) % 24.
+            #
+            #  (D) DELIVERY @ t: commitments registered `lead` hours ago whose
+            #      delivery_hour == t are now active. For each, draw activation;
+            #      if activated, pay the ENERGY payment, move SoC, and — if the
+            #      battery cannot physically deliver (insufficient SoC/headroom)
+            #      — charge a non-delivery PENALTY of penalty_k * energy_price
+            #      on the undelivered MWh.
+            delivery_hour = (t + self.commitment_lead_time) % self.episode_hours
+
+            # ---- (C) award + register future commitment ----
+            # Option 3: capacity is NO LONGER paid here at bid time. Both the
+            # capacity payment and the energy payment are now booked together at
+            # DELIVERY (Step D). This collapses the reward of a service into a
+            # single coherent event at the delivery hour, instead of splitting an
+            # immediate capacity reward (which rewarded over-committing) from a
+            # delayed penalty. Combined with the pending-commitment observation
+            # features, it gives the PPO a single, attributable consequence.
+            for st in service_types:
+                s = services_by_type.get(st)
+                if s is None or agg_bids[st] < 1.0:
+                    continue
+                if directional_awarded_services is not None and st != ServiceType.FCR:
+                    awarded = st in directional_awarded_services
+                else:
+                    awarded = self._rng.random() < s.award_probability
+                if not awarded:
+                    continue
+                for a in self.agents:
+                    # register the won capacity as a future commitment; payment
+                    # happens at delivery (Step D).
+                    mw = per_agent_bid[a][st]
+                    if mw > 0:
+                        self._commitments.add(
+                            a, _service_key_for(st), mw,
+                            bid_hour=t, delivery_hour=delivery_hour,
+                        )
+
+            # ---- (D) deliver + activate commitments due THIS hour ----
+            # FIX (SOC bound safety): multiple commitments can activate in the
+            # same hour. Each one's deliverable must be computed against the SoC
+            # AS IT EVOLVES within the hour, not the hour's starting SoC, or the
+            # cumulative SoC delta can push past [soc_min, soc_max]. We track a
+            # projected SoC `soc_proj` that starts at the current SoC and is
+            # updated after every activation, so the headroom each commitment
+            # sees already accounts for the ones processed before it. This makes
+            # bound violations structurally impossible (MILP/BC stayed in bounds
+            # only because they bid sanely; overcommitting policies exposed the
+            # missing within-hour clamp).
             for a in self.agents:
-                share = (per_agent_bid[a][st] / agg_bids[st]
-                          if agg_bids[st] > 0 else 0.0)
-                per_agent_flex[a] += share * (total_cap_payment + total_energy_payment)
-                if activated:
-                    i = self.agent_name_mapping[a]
-                    bp = self.multi_params.batteries[i]
-                    cap = bp.capacity_mwh
-                    eff = bp.efficiency
-                    # Activated energy in MWh: bid (MW) * 1h
-                    activated_mwh = per_agent_bid[a][st]
-                    flex_throughput_per_agent[a] += activated_mwh
-                    # SOC delta per direction
+                i = self.agent_name_mapping[a]
+                bp = self.multi_params.batteries[i]
+                cap = bp.capacity_mwh
+                eff = bp.efficiency
+                soc_proj = self._socs[i]  # evolves as activations are applied
+                for c in self._commitments.active_commitments(a, t):
+                    st = _service_type_for(c.service)
+                    s = services_by_type.get(st)
+                    if s is None:
+                        continue
+                    # Capacity payment booked at DELIVERY (Option 3): paid for
+                    # being available this hour, regardless of activation.
+                    cap_pay = s.capacity_price * c.mw
+                    per_agent_flex[a] += cap_pay
+                    per_service_revenue[st] = per_service_revenue.get(st, 0.0) + cap_pay
+                    # activation draw in the DELIVERY hour
+                    if self._rng.random() >= s.activation_probability:
+                        continue
+                    direction = service_directions.get(st, 'sym')
+                    requested_mwh = c.mw  # MW * 1h
+                    energy_price = s.energy_price
+                    # Deliverable given the PROJECTED SoC (already reflects
+                    # earlier activations in this same hour).
                     if direction == 'up':
-                        # Upward = BESS discharges -> SOC down
-                        per_agent_dsoc_act[a] -= activated_mwh / (eff * cap)
+                        deliverable = max(0.0, (soc_proj - self.soc_min) * eff * cap)
                     elif direction == 'dn':
-                        # Downward = BESS charges -> SOC up
-                        per_agent_dsoc_act[a] += (eff * activated_mwh) / cap
-                    # FCR symmetric: no net SOC impact (already constrained by sustain)
+                        deliverable = max(0.0, (self.soc_max - soc_proj) * cap / eff)
+                    else:  # FCR symmetric: limited by the tighter of the two rooms
+                        deliverable = max(0.0, min((soc_proj - self.soc_min),
+                                                   (self.soc_max - soc_proj)) * cap)
+                    delivered = min(requested_mwh, deliverable)
+                    undelivered = max(0.0, requested_mwh - delivered)
+
+                    # energy payment on what was delivered
+                    pay = energy_price * delivered
+                    per_agent_flex[a] += pay
+                    per_service_revenue[st] = per_service_revenue.get(st, 0.0) + pay
+                    flex_throughput_per_agent[a] += delivered
+                    # Update BOTH the accumulator (applied later) and the local
+                    # projection (so the next commitment sees the new headroom).
+                    if direction == 'up':
+                        dsoc = -delivered / (eff * cap)
+                    elif direction == 'dn':
+                        dsoc = (eff * delivered) / cap
+                    else:
+                        dsoc = 0.0
+                    per_agent_dsoc_act[a] += dsoc
+                    soc_proj = min(self.soc_max, max(self.soc_min, soc_proj + dsoc))
+
+                    # (D) NON-DELIVERY PENALTY on the shortfall
+                    if undelivered > 0:
+                        penalty = self.penalty_k * energy_price * undelivered
+                        per_agent_flex[a] -= penalty
+                        per_service_revenue[st] = per_service_revenue.get(st, 0.0) - penalty
 
         # Apply SOC delta from activations
         for a in self.agents:
@@ -547,7 +741,8 @@ class MultiBESSEnv(ParallelEnv):
     # Action decoding + feasibility projection
     # ------------------------------------------------------------------
 
-    def _decode_clip_actions(self, actions: Dict[str, np.ndarray]) -> Dict[str, Dict[str, float]]:
+    def _decode_clip_actions(self, actions: Dict[str, np.ndarray],
+                             hour: Optional[int] = None) -> Dict[str, Dict[str, float]]:
         """Decode discrete actions to MW values, then project to feasible set.
 
         In legacy mode (5-axis): [charge, discharge, FCR, aFRR, mFRR].
@@ -560,10 +755,17 @@ class MultiBESSEnv(ParallelEnv):
              sustain the activation for `sustain_hours` (1h aFRR, 2h mFRR).
              Downward reserves are capped so SOC has headroom to absorb.
           c) Total capacity balance: same as legacy but extended to 7 axes.
+
+        STEP B (capacity locking): when commitments are enabled, the power
+        already frozen by commitments active at `hour` is subtracted from the
+        battery's available P_max BEFORE the capacity balance, so new bids and
+        arbitrage must fit in the REMAINING headroom. This is what makes
+        over-committing costly: locked power is not free to reuse.
         """
         out = {}
         afrr_sustain = 1.0   # hours; matches MILP default
         mfrr_sustain = 2.0
+        _use_lock = (self.enable_commitments and hour is not None)
 
         for a in self.agents:
             i = self.agent_name_mapping[a]
@@ -573,6 +775,16 @@ class MultiBESSEnv(ParallelEnv):
             cap = bp.capacity_mwh
             eff = bp.efficiency
             soc = self._socs[i]
+
+            # STEP B: shrink available power by what is already locked at `hour`.
+            # Fractions were decoded against the nominal P_max, so we scale the
+            # CAP (the capacity-balance budget) down to the free headroom. The
+            # locked capacity itself is handled separately (it is honoured/
+            # activated via the commitment table in Step D), so here we only
+            # ensure NEW bids + arbitrage fit in what is left.
+            locked = (self._commitments.locked_power(a, hour)
+                      if _use_lock else 0.0)
+            P_free = max(0.0, P_max - locked)
 
             if self.directional_services:
                 (P_ch, P_dis, R_fcr,
@@ -592,11 +804,14 @@ class MultiBESSEnv(ParallelEnv):
                     if R_mfrr_up >= R_mfrr_dn: R_mfrr_dn = 0.0
                     else: R_mfrr_up = 0.0
 
-                # 2) Capacity balance: total <= P_max
+                # 2) Capacity balance: total <= P_free (= P_max - locked).
+                # With commitments enabled, P_free is the headroom left after
+                # honouring power already frozen by active commitments; this is
+                # the mechanism that penalises over-committing.
                 total = (P_ch + P_dis + R_fcr
                          + R_afrr_up + R_afrr_dn + R_mfrr_up + R_mfrr_dn)
-                if total > P_max and total > 0:
-                    scale = P_max / total
+                if total > P_free and total > 0:
+                    scale = P_free / total
                     P_ch *= scale; P_dis *= scale; R_fcr *= scale
                     R_afrr_up *= scale; R_afrr_dn *= scale
                     R_mfrr_up *= scale; R_mfrr_dn *= scale
@@ -648,8 +863,8 @@ class MultiBESSEnv(ParallelEnv):
                 if P_ch >= P_dis: P_dis = 0.0
                 else: P_ch = 0.0
             total = P_ch + P_dis + R_fcr + R_afrr + R_mfrr
-            if total > P_max and total > 0:
-                scale = P_max / total
+            if total > P_free and total > 0:
+                scale = P_free / total
                 P_ch *= scale; P_dis *= scale
                 R_fcr *= scale; R_afrr *= scale; R_mfrr *= scale
             P_ch_max = max(0.0, (self.soc_max - soc) * cap / eff)
@@ -719,6 +934,25 @@ class MultiBESSEnv(ParallelEnv):
             obs[14] = mfrr.capacity_price / 50.0
             obs[17] = mfrr.energy_price / 200.0
             obs[20] = mfrr.award_probability
+
+        # ---- 21-27: pending-commitment features (Option 4) ----
+        # For each directional service axis, how much capacity this agent has
+        # already committed for delivery in the upcoming hours, normalised by
+        # P_max. Zero when commitments are disabled. This makes the bid->
+        # activation link observable: a bid placed now shows up here until it is
+        # delivered, so the policy can (a) see the consequence building up when
+        # it bids and (b) anticipate the activation when delivery approaches.
+        if self.enable_commitments:
+            pmax = max(bp.max_power_mw, 1e-9)
+            # sum committed MW per service across all currently-pending
+            # commitments for this agent (any delivery hour still in the future
+            # or due now), so the agent sees its outstanding obligations.
+            pend = {k: 0.0 for k in _ORDERED_SERVICE_KEYS}
+            for c in self._commitments.snapshot().get(agent, []):
+                if c.service in pend:
+                    pend[c.service] += c.mw
+            for j, k in enumerate(_ORDERED_SERVICE_KEYS):
+                obs[21 + j] = min(pend[k] / pmax, 2.0)
         return obs
 
     # ------------------------------------------------------------------

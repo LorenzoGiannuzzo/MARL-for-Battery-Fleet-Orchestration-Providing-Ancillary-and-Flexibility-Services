@@ -49,15 +49,20 @@ warnings.simplefilter("ignore")
 # BC policy network: architecture mirrors PPO RLModule's actor side
 # ============================================================================
 # RLlib DefaultPPOTorchRLModule structure (inspected at build time):
-#   encoder.actor_encoder.net.mlp.0: Linear(OBS_DIM, 128)
+#   encoder.actor_encoder.net.mlp.0: Linear(OBS_DIM, 512)
 #   tanh
-#   encoder.actor_encoder.net.mlp.2: Linear(128, 128)
+#   encoder.actor_encoder.net.mlp.2: Linear(512, 256)
 #   tanh
-#   pi.net.mlp.0: Linear(128, N_LOGITS) where N_LOGITS = 5 axes * 11 bins = 55
+#   pi.net.mlp.0: Linear(256, N_LOGITS) where N_LOGITS = n_axes * 11 bins
+#                 (= 77 for the directional 7-axis fleet, 55 for 5-axis)
 #
 # We match this exactly so weight transfer is a tensor-by-tensor copy.
+# CRITICAL: ENCODER_HIDDEN here MUST equal fcnet_hiddens passed to the PPO
+# (ppo_comparison.train_ppo_policy). If they differ, the encoder tensors are
+# silently skipped on transfer and the warm-start degrades (verify_transfer
+# << 1.0). Both are set to (512, 256).
 
-ENCODER_HIDDEN = (128, 128)
+ENCODER_HIDDEN = (512, 256)
 N_LOGITS = ACTION_AXES * N_ACTION_BINS  # 55
 
 
@@ -180,11 +185,25 @@ def generate_expert_demos(
                   for t in range(episode_hours)]
         services = MultiBESSEnv._default_services(episode_hours)
 
-        # Solve MILP for this scenario
+        # Solve MILP for this scenario.
+        # STRADA B: build the MILP in DIRECTIONAL (5-service) mode with
+        # sustain hours aligned to the env (multi_bess_env._decode_clip_actions):
+        #   FCR  4h  (Terna FCR Cooperation; env uses fcr_sustain=4.0)
+        #   aFRR 1h, mFRR 2h (env defaults).
+        # Previously this constructed the MILP with directional_services=False
+        # (3 aggregate services) and the default fcr_sustain_hours=0.25, so the
+        # expert planned in a more permissive world than the env it is later
+        # evaluated in; the env then clipped its FCR/flex reservations, which
+        # is the main driver of the MILP continuous->discrete collapse and of
+        # the BC inheriting sub-optimal 3-service actions.
         opt = MultiBESSMILPOptimizer(
             fleet, None,
             use_nonlinear_degradation=use_nonlinear_degradation,
             fce_cumulative_initial=fce_cumulative_initial,
+            directional_services=True,
+            fcr_sustain_hours=4.0,
+            afrr_sustain_hours=1.0,
+            mfrr_sustain_hours=2.0,
         )
         result = opt.optimize(episode_hours, prices, services)
         if result.solver_status != "Optimal":
@@ -198,11 +217,20 @@ def generate_expert_demos(
                 P_max = fleet.batteries[i].max_power_mw
                 P_ch = opt.variables['P_charge'][(i, t)].varValue
                 P_dis = opt.variables['P_discharge'][(i, t)].varValue
+                # STRADA B: read the 5 DIRECTIONAL reservation variables that
+                # exist when the MILP is built with directional_services=True
+                # (see _create_variables: _service_keys = ['fcr','afrr_up',
+                # 'afrr_dn','mfrr_up','mfrr_dn']). The old code read the 3
+                # non-directional keys (R_afrr/R_mfrr), which only exist in
+                # legacy mode and discard the up/dn split the env expects.
                 R_fcr = opt.variables['R_fcr'][(i, t)].varValue
-                R_afrr = opt.variables['R_afrr'][(i, t)].varValue
-                R_mfrr = opt.variables['R_mfrr'][(i, t)].varValue
-                actions_t[f"bess_{i}"] = _discretise_milp_action(
-                    P_ch, P_dis, R_fcr, R_afrr, R_mfrr, P_max,
+                R_afrr_up = opt.variables['R_afrr_up'][(i, t)].varValue
+                R_afrr_dn = opt.variables['R_afrr_dn'][(i, t)].varValue
+                R_mfrr_up = opt.variables['R_mfrr_up'][(i, t)].varValue
+                R_mfrr_dn = opt.variables['R_mfrr_dn'][(i, t)].varValue
+                actions_t[f"bess_{i}"] = _discretise_milp_action_directional(
+                    P_ch, P_dis, R_fcr,
+                    R_afrr_up, R_afrr_dn, R_mfrr_up, R_mfrr_dn, P_max,
                 )
             action_sequence.append(actions_t)
 

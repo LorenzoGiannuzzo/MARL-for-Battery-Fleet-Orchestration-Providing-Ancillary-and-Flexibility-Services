@@ -75,22 +75,29 @@ def train_ppo_policy(
     # --- Fix B: ancoraggio KL verso la BC congelata (solo warm-start) ---
     bc_kl_beta_start: float = 1.0,
     bc_kl_anneal_iters: Optional[int] = None,
+    bc_kl_beta_floor: float = 0.1,
     verbose: bool = True,
     directional_services: bool = False,
-    # --- Capacity/rollout overrides — Windows-safe defaults ---
-    # On Windows, Ray's plasma shared-memory store (CreateFileMapping) gets
-    # exhausted quickly with large per-iter sample batches when N_BESS is high
-    # and the MLP is wide. Empirically, train_batch_size=8000 + fcnet=(512,256)
-    # crashes after a single iteration on a 50-BESS directional setup with the
-    # error "CreateFileMapping() failed. GetLastError() = 1450".
-    # The defaults below are conservative: (256, 128) is only modestly bigger
-    # than (128, 128) and won't blow up shared memory; train_batch_size=4000
-    # is double the original RLlib default (2000) which gives less noisy
-    # gradients than the default while staying within Windows constraints.
-    # On Linux these can be raised back to (512, 256) / 8000.
-    fcnet_hiddens=(256, 128),
+    # --- Capacity/rollout overrides — Windows-safe AND BC-compatible ---
+    # CRITICAL: fcnet_hiddens MUST match the BC network architecture
+    # (BCPolicyNet ENCODER_HIDDEN in bc_pretraining_multi.py). If they
+    # differ, transfer_bc_weights_to_algo silently skips the mismatched
+    # encoder tensors and the "warm-start" becomes mostly random.
+    # Symptom in the log: "BC tensor(s) not transferred" + low overall
+    # match_rate (~0.54 instead of ~1.0). The KL anchor then pulls the
+    # random-ish PPO policy toward the BC, but very slowly, and the warm
+    # ends up worse than vanilla.
+    # SET TO (256, 128): this is the PPO architecture from the run where the
+    # warm-start beat the MILP by ~28% (14.7M vs 11.5M EUR on the 2024 test
+    # window). BCPolicyNet.ENCODER_HIDDEN has been aligned to (256, 128) too,
+    # so the transfer is now clean (verify_transfer == 1.0) AND the winning
+    # PPO capacity is restored. Keep these two in lock-step.
+    fcnet_hiddens=(512, 256),
     train_batch_size: int = 4000,
     rollout_fragment_length: int = 200,
+    enable_commitments: bool = False,
+    commitment_lead_time: int = 24,
+    penalty_k: float = 1.5,
 ):
     """Allena una shared-policy PPO sul MultiBESSEnv e restituisce l'algo RLlib."""
     register_multi_bess_env()
@@ -104,6 +111,9 @@ def train_ppo_policy(
         fcnet_hiddens=fcnet_hiddens,
         train_batch_size=train_batch_size,
         rollout_fragment_length=rollout_fragment_length,
+        enable_commitments=enable_commitments,
+        commitment_lead_time=commitment_lead_time,
+        penalty_k=penalty_k,
     )
 
     is_warm = bc_net is not None
@@ -129,10 +139,11 @@ def train_ppo_policy(
             policy_id=SHARED_POLICY_ID,
             beta_start=bc_kl_beta_start,
             anneal_iters=bc_kl_anneal_iters,
+            beta_floor=bc_kl_beta_floor,
         )
         if verbose:
             print(f"  [ppo] Fix B KL anchor: beta_start={bc_kl_beta_start}, "
-                  f"anneal_iters={bc_kl_anneal_iters}")
+                  f"anneal_iters={bc_kl_anneal_iters}, beta_floor={bc_kl_beta_floor}")
 
     algo = cfg.build_algo()  # RLlib 2.55: build_algo() (build() is deprecated)
 
@@ -180,14 +191,19 @@ def train_ppo_policy(
 
 def make_rllib_policy_fn(algo, policy_id: str = SHARED_POLICY_ID,
                          deterministic: bool = True,
-                         directional_services: bool = False):
+                         directional_services: bool = False,
+                         rng: Optional[np.random.Generator] = None):
     """Adatta un algo RLlib a policy_fn(obs)->action(n_axes,) per
     evaluate_policy_multi_day, così il PPO usa lo STESSO accounting env
-    di BC e random (apples-to-apples)."""
+    di BC e random (apples-to-apples).
+
+    rng: se passato e deterministic=False, il sampling stocastico usa questo
+    Generator invece dello stato globale np.random, per riproducibilità."""
     module = algo.get_module(policy_id)
     import torch
     from multi_bess_env import N_ACTION_BINS, ACTION_AXES, ACTION_AXES_DIRECTIONAL
     n_axes = ACTION_AXES_DIRECTIONAL if directional_services else ACTION_AXES
+    _choice = rng.choice if rng is not None else np.random.choice
 
     def policy(obs: np.ndarray) -> np.ndarray:
         t = torch.as_tensor(np.asarray(obs, dtype=np.float32)).unsqueeze(0)
@@ -199,7 +215,7 @@ def make_rllib_policy_fn(algo, policy_id: str = SHARED_POLICY_ID,
             return logits.argmax(axis=-1).astype(np.int64)
         probs = np.exp(logits - logits.max(axis=-1, keepdims=True))
         probs /= probs.sum(axis=-1, keepdims=True)
-        return np.array([np.random.choice(N_ACTION_BINS, p=probs[k])
+        return np.array([_choice(N_ACTION_BINS, p=probs[k])
                          for k in range(n_axes)], dtype=np.int64)
 
     return policy

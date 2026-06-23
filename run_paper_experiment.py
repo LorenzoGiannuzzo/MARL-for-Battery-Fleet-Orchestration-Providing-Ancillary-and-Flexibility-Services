@@ -1,4 +1,4 @@
-"""
+""""
 Run the multi-agent BSP paper experiment end-to-end.
 
 Usage
@@ -47,7 +47,7 @@ warnings.simplefilter("ignore")
 # CONFIG - edit this block
 # ============================================================================
 
-SCALE = "production"   # one of: "smoke", "medium", "production"
+SCALE = "smoke"   # one of: "smoke", "medium", "production"
 
 USE_REAL_PUN = True
 REAL_PUN_XLSX_PATH = [
@@ -110,6 +110,10 @@ def get_scale_config():
             bc_n_epochs=30,
             bc_batch_size=32,
             bc_lr=3e-3,
+            enable_commitments=True,
+            commitment_lead_time=24,
+            penalty_k=1.5,
+            master_seed=42,
         )
     elif SCALE == "medium":
         def fleet_builder():
@@ -124,6 +128,10 @@ def get_scale_config():
             bc_n_epochs=50,
             bc_batch_size=64,
             bc_lr=1e-3,
+            enable_commitments=True,
+            commitment_lead_time=24,
+            penalty_k=1.5,
+            master_seed=42,
         )
     elif SCALE == "production":
         def fleet_builder():
@@ -135,6 +143,10 @@ def get_scale_config():
             bc_n_epochs=50,
             bc_batch_size=128,
             bc_lr=1e-3,
+            enable_commitments=True,
+            commitment_lead_time=24,
+            penalty_k=1.5,
+            master_seed=42,
         )
     else:
         raise ValueError(f"unknown SCALE: {SCALE}")

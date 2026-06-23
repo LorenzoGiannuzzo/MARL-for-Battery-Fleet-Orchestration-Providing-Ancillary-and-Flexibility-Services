@@ -112,6 +112,13 @@ class KLAnchoredPPOTorchLearner(PPOTorchLearner):
         lcd = self.config.learner_config_dict or {}
         self._bc_kl_beta_start = float(lcd.get("bc_kl_beta_start", 1.0))
         self._bc_kl_anneal_iters = int(lcd.get("bc_kl_anneal_iters", 20))
+        # Fix 2: floor below which beta is NOT allowed to decay. The original
+        # anneal drove beta linearly to 0, which dissolved the BC anchor on the
+        # final iterations and let the warm-start policy drift back into the
+        # degenerate overcommit pattern (observed: iter 190->200 reward collapse
+        # 16004->13365 as beta->0). A floor keeps a residual anchor for the whole
+        # run so the policy stays in the BC basin. 0.1 by default.
+        self._bc_kl_beta_floor = float(lcd.get("bc_kl_beta_floor", 0.1))
         self._bc_kl_policy_id = lcd.get("bc_kl_policy_id", "shared_policy")
         self._bc_kl_iter = 0
         self._bc_kl_beta_now = self._bc_kl_beta_start
@@ -119,9 +126,13 @@ class KLAnchoredPPOTorchLearner(PPOTorchLearner):
     @override(PPOTorchLearner)
     def before_gradient_based_update(self, *, timesteps: Dict[str, Any]) -> None:
         super().before_gradient_based_update(timesteps=timesteps)
-        # Linear anneal beta_start -> 0 over anneal_iters training iterations.
+        # Linear anneal beta_start -> beta_floor over anneal_iters iterations.
+        # The floor keeps a residual BC anchor for the whole run (Fix 2):
+        # instead of beta_start*(1-frac) which reaches 0, we interpolate down
+        # to beta_floor and hold there.
         frac = min(1.0, self._bc_kl_iter / max(1, self._bc_kl_anneal_iters))
-        self._bc_kl_beta_now = self._bc_kl_beta_start * (1.0 - frac)
+        floor = getattr(self, "_bc_kl_beta_floor", 0.0)
+        self._bc_kl_beta_now = floor + (self._bc_kl_beta_start - floor) * (1.0 - frac)
         self._bc_kl_iter += 1
 
     @override(PPOTorchLearner)
@@ -184,6 +195,7 @@ def make_kl_anchored_config(
     policy_id: str = "shared_policy",
     beta_start: float = 1.0,
     anneal_iters: int = 20,
+    beta_floor: float = 0.1,
     device: str = "cpu",
 ):
     """Inserisce il learner KL-ancorato e registra la BC reference congelata.
@@ -200,6 +212,7 @@ def make_kl_anchored_config(
     learner_cfg = {
         "bc_kl_beta_start": float(beta_start),
         "bc_kl_anneal_iters": int(anneal_iters),
+        "bc_kl_beta_floor": float(beta_floor),
         "bc_kl_policy_id": policy_id,
     }
     # Newer RLlib: .learners(); older: .training(). Prefer .learners() and

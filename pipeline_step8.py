@@ -96,6 +96,9 @@ def generate_multi_day_expert_demos(
     env_seed: int = 0,
     record_trajectory: bool = False,
     directional_services: bool = False,
+    enable_commitments: bool = False,
+    commitment_lead_time: int = 24,
+    penalty_k: float = 1.5,
 ) -> MultiDayDemoResult:
     """Day-by-day MILP demo generation with rolling per-BESS state.
 
@@ -204,7 +207,16 @@ def generate_multi_day_expert_demos(
             hi = bp.soc_max - 1e-4
             soc_clamped.append(float(np.clip(soc[i], lo, hi)))
 
-        # Build the day's MILP with current rolling state
+        # Build the day's MILP with current rolling state.
+        # STRADA B: pass sustain hours explicitly so the MILP plans in the SAME
+        # world the env evaluates in. The env (multi_bess_env._decode_clip_actions)
+        # uses fcr_sustain=4.0, afrr_sustain=1.0, mfrr_sustain=2.0. The MILP
+        # constructor defaults fcr_sustain_hours to 0.25, so without this the
+        # MILP planned FCR for 15 min while the env required 4 h, letting the
+        # MILP over-reserve FCR/flex in planning; the env then clipped those
+        # reservations on roll-out. This is the single remaining MILP<->env
+        # mismatch (aFRR/mFRR sustain and directional mode already matched) and
+        # is the main driver of the continuous->discrete profit collapse.
         opt = MultiBESSMILPOptimizer(
             fleet, None,
             use_nonlinear_degradation=use_nonlinear_degradation,
@@ -212,6 +224,11 @@ def generate_multi_day_expert_demos(
             nonlinear_replacement_cost=nonlinear_replacement_cost,
             fce_cumulative_initial=fce,
             directional_services=directional_services,
+            fcr_sustain_hours=4.0,
+            afrr_sustain_hours=1.0,
+            mfrr_sustain_hours=2.0,
+            enable_commitments=enable_commitments,
+            penalty_k=penalty_k,
         )
         opt.current_soc = soc_clamped  # carry SOC over, clamped to MILP bounds
         result = opt.optimize(24, prices_day, services_day)
@@ -246,6 +263,8 @@ def generate_multi_day_expert_demos(
                 seed=env_seed + day,
                 directional_services=directional_services,
             )
+            if enable_commitments:
+                env.configure_commitments(True, commitment_lead_time, penalty_k)
             env.reset(seed=env_seed + day)
             env._socs = np.array(soc_clamped, dtype=np.float64)
             obs = {a: env._build_observation(a) for a in env.agents}
@@ -306,6 +325,8 @@ def generate_multi_day_expert_demos(
             seed=env_seed + day,
             directional_services=directional_services,
         )
+        if enable_commitments:
+            env.configure_commitments(True, commitment_lead_time, penalty_k)
         env.reset(seed=env_seed + day)
         env._socs = np.array(soc, dtype=np.float64)
         obs = {a: env._build_observation(a) for a in env.agents}
@@ -500,6 +521,9 @@ def evaluate_policy_multi_day(
     record_trajectory: bool = False,
     directional_services: bool = False,
     progress_label: str = "policy",
+    enable_commitments: bool = False,
+    commitment_lead_time: int = 24,
+    penalty_k: float = 1.5,
 ) -> MultiDayEvalResult:
     """Evaluate a policy across multiple days with rolling state.
 
@@ -585,6 +609,8 @@ def evaluate_policy_multi_day(
             seed=env_seed + day,
             directional_services=directional_services,
         )
+        if enable_commitments:
+            env.configure_commitments(True, commitment_lead_time, penalty_k)
         env.reset(seed=env_seed + day)
         env._socs = np.array(soc, dtype=np.float64)
         obs = {a: env._build_observation(a) for a in env.agents}
@@ -861,6 +887,10 @@ def run_full_pipeline(
     run_ppo_bc_warmstart: bool = False,
     ppo_iterations: int = 200,
     directional_services: bool = False,
+    master_seed: Optional[int] = None,
+    enable_commitments: bool = False,
+    commitment_lead_time: int = 24,
+    penalty_k: float = 1.5,
 ) -> FullPipelineResult:
     """End-to-end pipeline: data -> MILP demos -> BC training -> evaluation.
 
@@ -879,6 +909,28 @@ def run_full_pipeline(
     user's Italian_BESS_Markets_Reference workbook).
     """
     N = fleet.n_batteries
+
+    # ------------------------------------------------------------------
+    # Reproducibility: pin all global RNGs ONCE, before anything random
+    # happens (env build, MILP, BC init, PPO weight init). If master_seed is
+    # given, derive every per-stage seed from it so a single number fully
+    # determines the run; otherwise keep the explicitly-passed seeds and just
+    # pin globals to data_seed for backward compatibility.
+    # ------------------------------------------------------------------
+    from seeding import set_global_seeds, derive_seeds
+    if master_seed is not None:
+        _seeds = derive_seeds(master_seed)
+        data_seed = _seeds["data_seed"]
+        bc_seed = _seeds["bc_seed"]
+        eval_seed = _seeds["eval_seed"]
+        ppo_seed = _seeds["ppo_seed"]
+        set_global_seeds(master_seed)
+        print(f"[pipeline] reproducible mode: master_seed={master_seed} -> "
+              f"data={data_seed}, bc={bc_seed}, eval={eval_seed}, ppo={ppo_seed}")
+    else:
+        ppo_seed = eval_seed
+        set_global_seeds(data_seed)
+
     test_start = train_start + timedelta(days=train_days)
     test_end = test_start + timedelta(days=test_days)
 
@@ -928,6 +980,9 @@ def run_full_pipeline(
         use_nonlinear_degradation=use_nonlinear_degradation,
         env_seed=eval_seed,
         directional_services=directional_services,
+        enable_commitments=enable_commitments,
+        commitment_lead_time=commitment_lead_time,
+        penalty_k=penalty_k,
     )
     print(f"  demos: {train_demo.obs.shape[0]} samples, "
           f"total train MILP profit: {train_demo.total_milp_profit:.2f} EUR, "
@@ -978,6 +1033,9 @@ def run_full_pipeline(
         env_seed=eval_seed + 1000,
         record_trajectory=True,
         directional_services=directional_services,
+        enable_commitments=enable_commitments,
+        commitment_lead_time=commitment_lead_time,
+        penalty_k=penalty_k,
     )
 
     # BC policy on the test window
@@ -993,6 +1051,9 @@ def run_full_pipeline(
         env_seed=eval_seed + 1000,
         record_trajectory=True,
         directional_services=directional_services,
+        enable_commitments=enable_commitments,
+        commitment_lead_time=commitment_lead_time,
+        penalty_k=penalty_k,
     )
 
     # Random baseline on the test window
@@ -1008,6 +1069,9 @@ def run_full_pipeline(
         env_seed=eval_seed + 1000,
         record_trajectory=True,
         directional_services=directional_services,
+        enable_commitments=enable_commitments,
+        commitment_lead_time=commitment_lead_time,
+        penalty_k=penalty_k,
     )
 
     # ---- PPO comparison (Step 6 algorithm) ----
@@ -1022,8 +1086,11 @@ def run_full_pipeline(
         print(f"[pipeline] PPO vanilla: {ppo_iterations} iters on train window...")
         algo_v = train_ppo_policy(
             fleet, n_iterations=ppo_iterations, bc_net=None,
-            use_nonlinear_degradation=use_nonlinear_degradation, seed=eval_seed,
+            use_nonlinear_degradation=use_nonlinear_degradation, seed=ppo_seed,
             directional_services=directional_services,
+            enable_commitments=enable_commitments,
+            commitment_lead_time=commitment_lead_time,
+            penalty_k=penalty_k,
         )
         ppo_training_metrics["ppo_vanilla"] = [
             float(m.get("episode_reward_mean", 0.0) or 0.0)
@@ -1041,6 +1108,9 @@ def run_full_pipeline(
             env_seed=eval_seed + 1000,
             record_trajectory=True,
             directional_services=directional_services,
+            enable_commitments=enable_commitments,
+            commitment_lead_time=commitment_lead_time,
+            penalty_k=penalty_k,
         )
         ppo_results["ppo_vanilla"] = ppo_v_eval
         try:
@@ -1051,8 +1121,11 @@ def run_full_pipeline(
         print(f"[pipeline] PPO BC-warmstart: {ppo_iterations} iters on train window...")
         algo_w = train_ppo_policy(
             fleet, n_iterations=ppo_iterations, bc_net=bc_net, bc_kl_beta_start=1.0, bc_kl_anneal_iters=ppo_iterations,
-            use_nonlinear_degradation=use_nonlinear_degradation, seed=eval_seed,
+            use_nonlinear_degradation=use_nonlinear_degradation, seed=ppo_seed,
             directional_services=directional_services,
+            enable_commitments=enable_commitments,
+            commitment_lead_time=commitment_lead_time,
+            penalty_k=penalty_k,
         )
         ppo_training_metrics["ppo_bc"] = [
             float(m.get("episode_reward_mean", 0.0) or 0.0)
@@ -1070,6 +1143,9 @@ def run_full_pipeline(
             env_seed=eval_seed + 1000,
             record_trajectory=True,
             directional_services=directional_services,
+            enable_commitments=enable_commitments,
+            commitment_lead_time=commitment_lead_time,
+            penalty_k=penalty_k,
         )
         ppo_results["ppo_bc"] = ppo_w_eval
         try:

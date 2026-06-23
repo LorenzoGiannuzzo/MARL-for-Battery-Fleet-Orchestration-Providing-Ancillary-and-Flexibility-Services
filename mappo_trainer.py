@@ -116,6 +116,14 @@ def _env_creator(env_config: Dict[str, Any]):
         seed=seed,
         directional_services=directional,
     )
+    # Realistic commitment market model (Steps A-D). Off by default; switched
+    # on by passing enable_commitments via env_config (build_default_config).
+    if env_config.get("enable_commitments", False):
+        raw_env.configure_commitments(
+            enable=True,
+            lead_time=env_config.get("commitment_lead_time", 24),
+            penalty_k=env_config.get("penalty_k", 1.5),
+        )
     return ParallelPettingZooEnv(raw_env)
 
 
@@ -153,8 +161,11 @@ def build_default_config(
     entropy_coeff: float = 0.001,
     num_env_runners: int = 1,
     rollout_fragment_length: int = 200,
-    fcnet_hiddens: Tuple[int, ...] = (128, 128),
+    fcnet_hiddens: Tuple[int, ...] = (512, 256),
     directional_services: bool = False,
+    enable_commitments: bool = False,
+    commitment_lead_time: int = 24,
+    penalty_k: float = 1.5,
 ) -> PPOConfig:
     """Build a PPOConfig for shared-policy multi-agent training.
 
@@ -185,6 +196,9 @@ def build_default_config(
         fce_cumulative_initial=fce_cumulative_initial,
         seed=seed,
         directional_services=directional_services,
+        enable_commitments=enable_commitments,
+        commitment_lead_time=commitment_lead_time,
+        penalty_k=penalty_k,
     )
 
     config = (
@@ -308,6 +322,7 @@ def evaluate_policy(
     n_episodes: int = 20,
     env_config_override: Optional[Dict[str, Any]] = None,
     deterministic: bool = True,
+    rng: Optional[np.random.Generator] = None,
 ) -> Dict[str, Any]:
     """Evaluate the trained shared policy over n_episodes.
 
@@ -369,7 +384,11 @@ def evaluate_policy(
                         else:
                             p = np.exp(sl - sl.max())
                             p /= p.sum()
-                            a_list.append(int(np.random.choice(bins_per_axis, p=p)))
+                            # Reproducible: draw from a passed-in Generator
+                            # rather than the process-global np.random state.
+                            _draw = (rng.choice if rng is not None
+                                     else np.random.choice)
+                            a_list.append(int(_draw(bins_per_axis, p=p)))
                     a_np = np.array(a_list, dtype=np.int64)
                 actions[agent_id] = a_np
             obs, rewards, terms, truncs, infos = wrapped.step(actions)

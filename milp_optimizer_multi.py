@@ -231,7 +231,9 @@ class MultiBESSMILPOptimizer:
                  fcr_sustain_hours: float = 0.25,
                  directional_services: bool = False,
                  afrr_sustain_hours: float = 1.0,
-                 mfrr_sustain_hours: float = 2.0):
+                 mfrr_sustain_hours: float = 2.0,
+                 enable_commitments: bool = False,
+                 penalty_k: float = 1.5):
         """Multi-BESS MILP under BSP aggregation.
 
         Parameters
@@ -329,6 +331,23 @@ class MultiBESSMILPOptimizer:
         self.directional_services = bool(directional_services)
         self.afrr_sustain_hours = float(afrr_sustain_hours)
         self.mfrr_sustain_hours = float(mfrr_sustain_hours)
+        # Commitment market model (Step E). enable_commitments adds a formal
+        # expected non-delivery penalty term to the objective, for symmetry
+        # with the env's reward (multi_bess_env, Steps C/D). Because A_s <= R_s
+        # and the sustain constraints guarantee the reserved capacity is always
+        # deliverable, this penalty is structurally zero at the MILP optimum;
+        # it is included so the MILP and the env optimise the SAME objective
+        # function and no reviewer can claim they differ.
+        #
+        # NOTE on the day-ahead lag: the env bids services `lead` hours ahead.
+        # The MILP is a PERFECT-FORESIGHT oracle — it already knows all 24h of
+        # prices — so deciding a bid `lead` hours earlier gives it no less
+        # information. Its optimal solution is therefore INVARIANT to the bid
+        # lag, and we deliberately do NOT replicate the lag here (which would
+        # need a multi-day horizon and only add timeouts for an identical
+        # result). The lag handicaps only the information-limited PPO.
+        self.enable_commitments = bool(enable_commitments)
+        self.penalty_k = float(penalty_k)
 
         # Active service keys for variable generation and constraint loops.
         # Order is preserved across the MILP for consistent indexing.
@@ -664,6 +683,23 @@ class MultiBESSMILPOptimizer:
                 agg_A = pulp.lpSum([v[f'A_{s_key}'][(i, t)] for i in range(N)])
                 obj += s.capacity_price * aw * agg_R
                 obj += (s.energy_price * s.activation_probability * aw) * agg_A
+
+                # STEP E: formal expected non-delivery penalty, for symmetry
+                # with the env reward (Steps C/D). The shortfall (R - A) is the
+                # reserved capacity that, if called, cannot be delivered. The
+                # env charges penalty_k * energy_price on undelivered energy;
+                # in expectation that is penalty_k * energy_price *
+                # activation_prob * award_prob * (R - A). Since A_s <= R_s and
+                # the sustain constraints make R always deliverable, the MILP
+                # drives the shortfall to zero at the optimum (it simply sets
+                # A_s = R_s), so this term does not change the solution — it
+                # only guarantees identical objective functions across MILP and
+                # env. Disabled unless commitments are on, to keep legacy runs
+                # bit-identical.
+                if self.enable_commitments:
+                    shortfall = agg_R - agg_A
+                    obj -= (self.penalty_k * s.energy_price
+                            * s.activation_probability * aw) * shortfall
 
         return obj
 
