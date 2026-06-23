@@ -1,4 +1,4 @@
-""""
+"""
 Run the multi-agent BSP paper experiment end-to-end.
 
 Usage
@@ -114,6 +114,8 @@ def get_scale_config():
             commitment_lead_time=24,
             penalty_k=1.5,
             master_seed=42,
+            full_foresight=True,
+            overcommit_penalty=0.5,
         )
     elif SCALE == "medium":
         def fleet_builder():
@@ -132,6 +134,8 @@ def get_scale_config():
             commitment_lead_time=24,
             penalty_k=1.5,
             master_seed=42,
+            full_foresight=True,
+            overcommit_penalty=0.5,
         )
     elif SCALE == "production":
         def fleet_builder():
@@ -147,6 +151,8 @@ def get_scale_config():
             commitment_lead_time=24,
             penalty_k=1.5,
             master_seed=42,
+            full_foresight=True,
+            overcommit_penalty=0.5,
         )
     else:
         raise ValueError(f"unknown SCALE: {SCALE}")

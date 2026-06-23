@@ -126,6 +126,18 @@ OBS_DIM = 26  # see _build_observation for the schema
 # With commitments disabled these 5 features are always zero (legacy behaviour
 # preserved bit-for-bit except for the larger, zero-padded observation vector).
 
+# ---- Full-foresight (diagnostic) observation ----
+# When full_foresight=True the agent is given EVERYTHING the MILP sees: the true
+# PUN prices and the true service (cap_price, energy_price, award_prob) for ALL
+# 24 hours of the day, not just the current hour + 6h forecast. This removes the
+# PPO's information disadvantage entirely, turning it into a perfect-foresight
+# agent like the MILP. It is a DIAGNOSTIC test ("how close does the DRL get to
+# the MILP at equal information?"), NOT a deployable configuration. OBS grows by
+# 24 PUN + 24*5*3 service features = 24 + 360 = 384 extra dims.
+_FF_HOURS = 24
+_FF_N_SERVICES = 5  # FCR, aFRR_up, aFRR_dn, mFRR_up, mFRR_dn
+OBS_DIM_FULL_FORESIGHT = OBS_DIM + _FF_HOURS + _FF_HOURS * _FF_N_SERVICES * 3  # 26 + 384 = 410
+
 
 # ============================================================================
 # Environment
@@ -232,9 +244,14 @@ class MultiBESSEnv(ParallelEnv):
 
         # ---- Spaces per agent ----
         self._action_space = spaces.MultiDiscrete([N_ACTION_BINS] * self.n_action_axes)
+        # Full-foresight diagnostic flag: when on, the agent sees all 24h of true
+        # prices/services (everything the MILP sees). Read via getattr so it can
+        # be set before reset() like the commitment flags; default off.
+        self.full_foresight: bool = bool(getattr(self, "full_foresight", False))
+        _obs_dim = OBS_DIM_FULL_FORESIGHT if self.full_foresight else OBS_DIM
         # Observation bounds are loose, normalised features in [-2, 2]
         self._observation_space = spaces.Box(
-            low=-2.0, high=2.0, shape=(OBS_DIM,), dtype=np.float32,
+            low=-2.0, high=2.0, shape=(_obs_dim,), dtype=np.float32,
         )
 
         # ---- Per-agent runtime state ----
@@ -270,6 +287,15 @@ class MultiBESSEnv(ParallelEnv):
             getattr(self, "commitment_lead_time", 24))
         self.penalty_k: float = float(
             getattr(self, "penalty_k", DEFAULT_PENALTY_K))
+        # Cure 1+2: immediate per-hour penalty on RAW overcommit (bids beyond
+        # available power, measured pre-clip in _decode_clip_actions as a
+        # fraction of P_max). Default 0.0 = OFF, so existing runs are unaffected.
+        # When > 0, step() subtracts overcommit_penalty * excess_fraction * P_max
+        # from each agent's reward IN THE SAME HOUR, an immediate, attributable
+        # signal against saturating all axes. MILP and BC never overcommit, so
+        # their penalty is always 0 and the comparison stays fair.
+        self.overcommit_penalty: float = float(
+            getattr(self, "overcommit_penalty", 0.0))
         self._commitments: CommitmentTable = CommitmentTable(
             list(self.possible_agents))
 
@@ -300,6 +326,28 @@ class MultiBESSEnv(ParallelEnv):
         self.enable_commitments = bool(enable)
         self.commitment_lead_time = int(lead_time)
         self.penalty_k = float(penalty_k)
+        return self
+
+    def configure_overcommit_penalty(self, coeff: float = 0.0):
+        """Set the immediate overcommit penalty coefficient (Cure 1+2).
+        0.0 disables it (default). When > 0, each agent is charged
+        coeff * overcommit_excess_fraction * P_max in the same hour it bids
+        beyond available power. Returns self.
+        """
+        self.overcommit_penalty = float(coeff)
+        return self
+
+    def configure_full_foresight(self, enable: bool = True):
+        """Enable the diagnostic full-foresight observation (all 24h true
+        prices/services, everything the MILP sees). Resizes the observation
+        space. Call after construction and before reset. Returns self.
+        Diagnostic only — turns the PPO into a perfect-foresight agent.
+        """
+        self.full_foresight = bool(enable)
+        _obs_dim = OBS_DIM_FULL_FORESIGHT if self.full_foresight else OBS_DIM
+        self._observation_space = spaces.Box(
+            low=-2.0, high=2.0, shape=(_obs_dim,), dtype=np.float32,
+        )
         return self
 
     def observation_space(self, agent: str) -> spaces.Space:
@@ -375,6 +423,7 @@ class MultiBESSEnv(ParallelEnv):
         rewards: Dict[str, float] = {}
         per_agent_arb: Dict[str, float] = {}
         per_agent_deg: Dict[str, float] = {}
+        per_agent_overcommit_pen: Dict[str, float] = {}
         per_agent_flex: Dict[str, float] = {a: 0.0 for a in self.agents}
         per_agent_throughput: Dict[str, float] = {}
 
@@ -685,7 +734,17 @@ class MultiBESSEnv(ParallelEnv):
                     pass
 
             per_agent_deg[a] = deg
-            rewards[a] = per_agent_arb[a] + per_agent_flex[a] - deg
+            # Cure 1+2: immediate per-hour penalty on raw overcommit. The excess
+            # (fraction of P_max bid beyond available power, captured pre-clip)
+            # is converted to a power-equivalent and charged at the configured
+            # coefficient. Zero when overcommit_penalty == 0 (default) or when
+            # the agent did not overcommit (always the case for MILP/BC), so the
+            # cross-policy comparison stays fair — only saturating policies pay.
+            oc_excess = per_agent[a].get('overcommit', 0.0)
+            bp_a = self.multi_params.batteries[self.agent_name_mapping[a]]
+            oc_pen = self.overcommit_penalty * oc_excess * bp_a.max_power_mw
+            per_agent_overcommit_pen[a] = oc_pen
+            rewards[a] = per_agent_arb[a] + per_agent_flex[a] - deg - oc_pen
 
         # ---- Advance hour ----
         self._hour += 1
@@ -810,6 +869,14 @@ class MultiBESSEnv(ParallelEnv):
                 # the mechanism that penalises over-committing.
                 total = (P_ch + P_dis + R_fcr
                          + R_afrr_up + R_afrr_dn + R_mfrr_up + R_mfrr_dn)
+                # Cure 2: record the RAW overcommit excess (before scaling),
+                # normalised by P_max. This is the amount the agent tried to bid
+                # beyond its available power. A reward penalty proportional to
+                # this is applied in step(), giving an IMMEDIATE, attributable
+                # signal against saturating all axes — the gradient that the
+                # mere proportional rescale below does NOT provide (rescaling
+                # keeps the full allocation, so saturating was previously free).
+                overcommit_excess = max(0.0, total - P_free) / max(P_max, 1e-9)
                 if total > P_free and total > 0:
                     scale = P_free / total
                     P_ch *= scale; P_dis *= scale; R_fcr *= scale
@@ -854,6 +921,7 @@ class MultiBESSEnv(ParallelEnv):
                     'P_charge': P_ch, 'P_discharge': P_dis, 'R_fcr': R_fcr,
                     'R_afrr_up': R_afrr_up, 'R_afrr_dn': R_afrr_dn,
                     'R_mfrr_up': R_mfrr_up, 'R_mfrr_dn': R_mfrr_dn,
+                    'overcommit': overcommit_excess,
                 }
                 continue
 
@@ -863,6 +931,7 @@ class MultiBESSEnv(ParallelEnv):
                 if P_ch >= P_dis: P_dis = 0.0
                 else: P_ch = 0.0
             total = P_ch + P_dis + R_fcr + R_afrr + R_mfrr
+            overcommit_excess = max(0.0, total - P_free) / max(P_max, 1e-9)
             if total > P_free and total > 0:
                 scale = P_free / total
                 P_ch *= scale; P_dis *= scale
@@ -874,6 +943,7 @@ class MultiBESSEnv(ParallelEnv):
             out[a] = {
                 'P_charge': P_ch, 'P_discharge': P_dis,
                 'R_fcr': R_fcr, 'R_afrr': R_afrr, 'R_mfrr': R_mfrr,
+                'overcommit': overcommit_excess,
             }
         return out
 
@@ -906,7 +976,10 @@ class MultiBESSEnv(ParallelEnv):
         bp = self.multi_params.batteries[i]
         t = min(self._hour, self.episode_hours - 1)
 
-        obs = np.zeros(OBS_DIM, dtype=np.float32)
+        obs = np.zeros(
+            OBS_DIM_FULL_FORESIGHT if self.full_foresight else OBS_DIM,
+            dtype=np.float32,
+        )
         obs[0] = self._socs[i]
         obs[1] = min(self._lfp_states[i].fce_cumulative / 8000.0, 2.0)
         obs[2] = bp.capacity_mwh / 5.0
@@ -953,6 +1026,50 @@ class MultiBESSEnv(ParallelEnv):
                     pend[c.service] += c.mw
             for j, k in enumerate(_ORDERED_SERVICE_KEYS):
                 obs[21 + j] = min(pend[k] / pmax, 2.0)
+
+        # ---- 26+: full-foresight features (diagnostic) ----
+        # Give the agent EVERYTHING the MILP sees: the true PUN price and the
+        # true service (cap_price, energy_price, award_prob) for ALL 24 hours,
+        # using the same normalisation as the per-hour features above. Layout:
+        #   [26 : 26+24]                      -> 24h true PUN
+        #   [26+24 : 26+24+24*5*3]            -> per hour h in 0..23, per service
+        #                                        s in [FCR,aFRRup,aFRRdn,mFRRup,
+        #                                        mFRRdn]: cap, energy, award
+        # This makes the PPO a perfect-foresight agent like the MILP, isolating
+        # "how close does the DRL get at equal information?" from the information
+        # gap. Diagnostic only — not deployable.
+        if self.full_foresight:
+            o = OBS_DIM  # start index
+            H = self.episode_hours
+            for h in range(_FF_HOURS):
+                hh = min(h, H - 1)
+                obs[o + h] = self._prices_episode[hh] / 200.0
+            o += _FF_HOURS
+            # service normalisation constants mirror the per-hour block
+            cap_norm = {'R_fcr': 50.0, 'R_afrr_up': 100.0, 'R_afrr_dn': 100.0,
+                        'R_mfrr_up': 50.0, 'R_mfrr_dn': 50.0}
+            en_norm = {'R_fcr': 200.0, 'R_afrr_up': 300.0, 'R_afrr_dn': 300.0,
+                       'R_mfrr_up': 200.0, 'R_mfrr_dn': 200.0}
+            for h in range(_FF_HOURS):
+                hh = min(h, H - 1)
+                sbt = {s.service_type: s for s in self._services_episode[hh]}
+                for si, key in enumerate(_ORDERED_SERVICE_KEYS):
+                    st = _service_type_for(key)
+                    s = sbt.get(st)
+                    base_i = o + h * (_FF_N_SERVICES * 3) + si * 3
+                    if s is not None:
+                        obs[base_i + 0] = min(s.capacity_price / cap_norm[key], 2.0)
+                        obs[base_i + 1] = min(s.energy_price / en_norm[key], 2.0)
+                        obs[base_i + 2] = s.award_probability
+        # Safety clip to the observation Box bounds. Several normalised features
+        # (energy price /200, FCR cap price /50, etc.) can exceed 2.0 on real
+        # Italian price spikes (PUN > 400 EUR/MWh, high MSD prices). Without this
+        # clip the observation falls outside the declared Box[-2,2], which the
+        # RLlib connector validates and can reject. Clipping preserves ordering
+        # (a spike still reads as "max") while keeping the vector in-space. This
+        # also fixes a latent issue in the BASE features that predates
+        # full_foresight (indices 5-15 could hit 2.5-10 on price spikes).
+        np.clip(obs, -2.0, 2.0, out=obs)
         return obs
 
     # ------------------------------------------------------------------

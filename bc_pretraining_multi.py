@@ -295,7 +295,11 @@ def train_bc(
     val_ds = _BCDataset(obs[val_idx], actions[val_idx]) if n_val > 0 else None
 
     torch.manual_seed(seed)
-    net = BCPolicyNet(n_axes=n_axes)
+    # Infer obs_dim from the data so the BC net matches whatever observation
+    # schema the demos use (26 normal, 410 with full_foresight). Falls back to
+    # the module default if shape is unavailable.
+    inferred_obs_dim = int(obs.shape[1]) if getattr(obs, "ndim", 1) == 2 else OBS_DIM
+    net = BCPolicyNet(n_axes=n_axes, obs_dim=inferred_obs_dim)
     opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)

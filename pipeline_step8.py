@@ -99,6 +99,8 @@ def generate_multi_day_expert_demos(
     enable_commitments: bool = False,
     commitment_lead_time: int = 24,
     penalty_k: float = 1.5,
+    full_foresight: bool = False,
+    overcommit_penalty: float = 0.0,
 ) -> MultiDayDemoResult:
     """Day-by-day MILP demo generation with rolling per-BESS state.
 
@@ -265,6 +267,14 @@ def generate_multi_day_expert_demos(
             )
             if enable_commitments:
                 env.configure_commitments(True, commitment_lead_time, penalty_k)
+            if full_foresight:
+                env.configure_full_foresight(True)
+            if overcommit_penalty:
+                env.configure_overcommit_penalty(overcommit_penalty)
+                if full_foresight:
+                    env.configure_full_foresight(True)
+                if overcommit_penalty:
+                    env.configure_overcommit_penalty(overcommit_penalty)
             env.reset(seed=env_seed + day)
             env._socs = np.array(soc_clamped, dtype=np.float64)
             obs = {a: env._build_observation(a) for a in env.agents}
@@ -327,6 +337,10 @@ def generate_multi_day_expert_demos(
         )
         if enable_commitments:
             env.configure_commitments(True, commitment_lead_time, penalty_k)
+            if full_foresight:
+                env.configure_full_foresight(True)
+            if overcommit_penalty:
+                env.configure_overcommit_penalty(overcommit_penalty)
         env.reset(seed=env_seed + day)
         env._socs = np.array(soc, dtype=np.float64)
         obs = {a: env._build_observation(a) for a in env.agents}
@@ -524,6 +538,8 @@ def evaluate_policy_multi_day(
     enable_commitments: bool = False,
     commitment_lead_time: int = 24,
     penalty_k: float = 1.5,
+    full_foresight: bool = False,
+    overcommit_penalty: float = 0.0,
 ) -> MultiDayEvalResult:
     """Evaluate a policy across multiple days with rolling state.
 
@@ -611,6 +627,10 @@ def evaluate_policy_multi_day(
         )
         if enable_commitments:
             env.configure_commitments(True, commitment_lead_time, penalty_k)
+            if full_foresight:
+                env.configure_full_foresight(True)
+            if overcommit_penalty:
+                env.configure_overcommit_penalty(overcommit_penalty)
         env.reset(seed=env_seed + day)
         env._socs = np.array(soc, dtype=np.float64)
         obs = {a: env._build_observation(a) for a in env.agents}
@@ -891,6 +911,8 @@ def run_full_pipeline(
     enable_commitments: bool = False,
     commitment_lead_time: int = 24,
     penalty_k: float = 1.5,
+    full_foresight: bool = False,
+    overcommit_penalty: float = 0.0,
 ) -> FullPipelineResult:
     """End-to-end pipeline: data -> MILP demos -> BC training -> evaluation.
 
@@ -983,6 +1005,8 @@ def run_full_pipeline(
         enable_commitments=enable_commitments,
         commitment_lead_time=commitment_lead_time,
         penalty_k=penalty_k,
+            full_foresight=full_foresight,
+            overcommit_penalty=overcommit_penalty,
     )
     print(f"  demos: {train_demo.obs.shape[0]} samples, "
           f"total train MILP profit: {train_demo.total_milp_profit:.2f} EUR, "
@@ -1036,6 +1060,8 @@ def run_full_pipeline(
         enable_commitments=enable_commitments,
         commitment_lead_time=commitment_lead_time,
         penalty_k=penalty_k,
+            full_foresight=full_foresight,
+            overcommit_penalty=overcommit_penalty,
     )
 
     # BC policy on the test window
@@ -1054,6 +1080,8 @@ def run_full_pipeline(
         enable_commitments=enable_commitments,
         commitment_lead_time=commitment_lead_time,
         penalty_k=penalty_k,
+            full_foresight=full_foresight,
+            overcommit_penalty=overcommit_penalty,
     )
 
     # Random baseline on the test window
@@ -1072,6 +1100,8 @@ def run_full_pipeline(
         enable_commitments=enable_commitments,
         commitment_lead_time=commitment_lead_time,
         penalty_k=penalty_k,
+            full_foresight=full_foresight,
+            overcommit_penalty=overcommit_penalty,
     )
 
     # ---- PPO comparison (Step 6 algorithm) ----
@@ -1091,6 +1121,8 @@ def run_full_pipeline(
             enable_commitments=enable_commitments,
             commitment_lead_time=commitment_lead_time,
             penalty_k=penalty_k,
+            full_foresight=full_foresight,
+            overcommit_penalty=overcommit_penalty,
         )
         ppo_training_metrics["ppo_vanilla"] = [
             float(m.get("episode_reward_mean", 0.0) or 0.0)
@@ -1111,6 +1143,8 @@ def run_full_pipeline(
             enable_commitments=enable_commitments,
             commitment_lead_time=commitment_lead_time,
             penalty_k=penalty_k,
+            full_foresight=full_foresight,
+            overcommit_penalty=overcommit_penalty,
         )
         ppo_results["ppo_vanilla"] = ppo_v_eval
         try:
@@ -1126,6 +1160,8 @@ def run_full_pipeline(
             enable_commitments=enable_commitments,
             commitment_lead_time=commitment_lead_time,
             penalty_k=penalty_k,
+            full_foresight=full_foresight,
+            overcommit_penalty=overcommit_penalty,
         )
         ppo_training_metrics["ppo_bc"] = [
             float(m.get("episode_reward_mean", 0.0) or 0.0)
@@ -1146,6 +1182,8 @@ def run_full_pipeline(
             enable_commitments=enable_commitments,
             commitment_lead_time=commitment_lead_time,
             penalty_k=penalty_k,
+            full_foresight=full_foresight,
+            overcommit_penalty=overcommit_penalty,
         )
         ppo_results["ppo_bc"] = ppo_w_eval
         try:

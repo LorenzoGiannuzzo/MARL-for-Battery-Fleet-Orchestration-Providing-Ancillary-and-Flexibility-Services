@@ -124,6 +124,11 @@ def _env_creator(env_config: Dict[str, Any]):
             lead_time=env_config.get("commitment_lead_time", 24),
             penalty_k=env_config.get("penalty_k", 1.5),
         )
+    # Diagnostic full-foresight: give the agent all 24h true prices/services.
+    if env_config.get("full_foresight", False):
+        raw_env.configure_full_foresight(True)
+    if env_config.get("overcommit_penalty", 0.0):
+        raw_env.configure_overcommit_penalty(env_config.get("overcommit_penalty", 0.0))
     return ParallelPettingZooEnv(raw_env)
 
 
@@ -166,6 +171,8 @@ def build_default_config(
     enable_commitments: bool = False,
     commitment_lead_time: int = 24,
     penalty_k: float = 1.5,
+    full_foresight: bool = False,
+    overcommit_penalty: float = 0.0,
 ) -> PPOConfig:
     """Build a PPOConfig for shared-policy multi-agent training.
 
@@ -199,6 +206,8 @@ def build_default_config(
         enable_commitments=enable_commitments,
         commitment_lead_time=commitment_lead_time,
         penalty_k=penalty_k,
+        full_foresight=full_foresight,
+        overcommit_penalty=overcommit_penalty,
     )
 
     config = (

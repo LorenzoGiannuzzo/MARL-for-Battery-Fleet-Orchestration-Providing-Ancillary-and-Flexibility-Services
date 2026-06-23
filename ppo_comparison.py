@@ -98,6 +98,8 @@ def train_ppo_policy(
     enable_commitments: bool = False,
     commitment_lead_time: int = 24,
     penalty_k: float = 1.5,
+    full_foresight: bool = False,
+    overcommit_penalty: float = 0.0,
 ):
     """Allena una shared-policy PPO sul MultiBESSEnv e restituisce l'algo RLlib."""
     register_multi_bess_env()
@@ -114,6 +116,8 @@ def train_ppo_policy(
         enable_commitments=enable_commitments,
         commitment_lead_time=commitment_lead_time,
         penalty_k=penalty_k,
+        full_foresight=full_foresight,
+        overcommit_penalty=overcommit_penalty,
     )
 
     is_warm = bc_net is not None
