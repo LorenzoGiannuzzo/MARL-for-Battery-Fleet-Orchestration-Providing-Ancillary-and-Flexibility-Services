@@ -124,11 +124,9 @@ def _env_creator(env_config: Dict[str, Any]):
             lead_time=env_config.get("commitment_lead_time", 24),
             penalty_k=env_config.get("penalty_k", 1.5),
         )
-    # Diagnostic full-foresight: give the agent all 24h true prices/services.
-    if env_config.get("full_foresight", False):
-        raw_env.configure_full_foresight(True)
-    if env_config.get("overcommit_penalty", 0.0):
-        raw_env.configure_overcommit_penalty(env_config.get("overcommit_penalty", 0.0))
+    # Simple-market branch: no commitments (unless explicitly enabled), no
+    # full_foresight, no overcommit penalty. The env is a single-hour auction
+    # with 24h PUN foresight baked into the observation.
     return ParallelPettingZooEnv(raw_env)
 
 

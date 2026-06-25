@@ -93,6 +93,11 @@ def train_ppo_policy(
     # so the transfer is now clean (verify_transfer == 1.0) AND the winning
     # PPO capacity is restored. Keep these two in lock-step.
     fcnet_hiddens=(512, 256),
+    # Reduced from 4000 to 2000 to halve the rollout-buffer memory footprint.
+    # With full_foresight the observation is 410-dim (16x the normal 26), and on
+    # 50 BESS the 4000-sample buffer exhausted Windows shared memory, crashing
+    # the Ray raylet (CreateFileMapping failed, GetLastError 1450 = insufficient
+    # system resources) at PPO iter 1. Halving the batch halves the buffer.
     train_batch_size: int = 4000,
     rollout_fragment_length: int = 200,
     enable_commitments: bool = False,

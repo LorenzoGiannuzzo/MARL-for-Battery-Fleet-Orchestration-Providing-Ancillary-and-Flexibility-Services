@@ -110,12 +110,7 @@ def get_scale_config():
             bc_n_epochs=30,
             bc_batch_size=32,
             bc_lr=3e-3,
-            enable_commitments=True,
-            commitment_lead_time=24,
-            penalty_k=1.5,
             master_seed=42,
-            full_foresight=True,
-            overcommit_penalty=0.5,
         )
     elif SCALE == "medium":
         def fleet_builder():
@@ -130,12 +125,7 @@ def get_scale_config():
             bc_n_epochs=50,
             bc_batch_size=64,
             bc_lr=1e-3,
-            enable_commitments=True,
-            commitment_lead_time=24,
-            penalty_k=1.5,
             master_seed=42,
-            full_foresight=True,
-            overcommit_penalty=0.5,
         )
     elif SCALE == "production":
         def fleet_builder():
@@ -147,12 +137,7 @@ def get_scale_config():
             bc_n_epochs=50,
             bc_batch_size=128,
             bc_lr=1e-3,
-            enable_commitments=True,
-            commitment_lead_time=24,
-            penalty_k=1.5,
             master_seed=42,
-            full_foresight=True,
-            overcommit_penalty=0.5,
         )
     else:
         raise ValueError(f"unknown SCALE: {SCALE}")

@@ -267,13 +267,13 @@ def generate_multi_day_expert_demos(
             )
             if enable_commitments:
                 env.configure_commitments(True, commitment_lead_time, penalty_k)
-            if full_foresight:
+            if full_foresight and hasattr(env, 'configure_full_foresight'):
                 env.configure_full_foresight(True)
-            if overcommit_penalty:
+            if overcommit_penalty and hasattr(env, 'configure_overcommit_penalty'):
                 env.configure_overcommit_penalty(overcommit_penalty)
-                if full_foresight:
+                if full_foresight and hasattr(env, 'configure_full_foresight'):
                     env.configure_full_foresight(True)
-                if overcommit_penalty:
+                if overcommit_penalty and hasattr(env, 'configure_overcommit_penalty'):
                     env.configure_overcommit_penalty(overcommit_penalty)
             env.reset(seed=env_seed + day)
             env._socs = np.array(soc_clamped, dtype=np.float64)
@@ -337,9 +337,9 @@ def generate_multi_day_expert_demos(
         )
         if enable_commitments:
             env.configure_commitments(True, commitment_lead_time, penalty_k)
-            if full_foresight:
+            if full_foresight and hasattr(env, 'configure_full_foresight'):
                 env.configure_full_foresight(True)
-            if overcommit_penalty:
+            if overcommit_penalty and hasattr(env, 'configure_overcommit_penalty'):
                 env.configure_overcommit_penalty(overcommit_penalty)
         env.reset(seed=env_seed + day)
         env._socs = np.array(soc, dtype=np.float64)
@@ -627,9 +627,9 @@ def evaluate_policy_multi_day(
         )
         if enable_commitments:
             env.configure_commitments(True, commitment_lead_time, penalty_k)
-            if full_foresight:
+            if full_foresight and hasattr(env, 'configure_full_foresight'):
                 env.configure_full_foresight(True)
-            if overcommit_penalty:
+            if overcommit_penalty and hasattr(env, 'configure_overcommit_penalty'):
                 env.configure_overcommit_penalty(overcommit_penalty)
         env.reset(seed=env_seed + day)
         env._socs = np.array(soc, dtype=np.float64)
