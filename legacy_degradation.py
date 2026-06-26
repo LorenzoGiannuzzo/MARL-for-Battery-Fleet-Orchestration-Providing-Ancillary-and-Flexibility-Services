@@ -221,7 +221,7 @@ class ForecastErrorGenerator:
         Parameters
         ----------
         json_path : str
-            Path to the JSON file produced by `forecast_error_calibration.
+            Path to the JSON file produced by `forecast_calibration.
             save_calibrations_json`.
         regime : str
             Regime key inside the JSON (e.g. 'normalized_2023_2024',

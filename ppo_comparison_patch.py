@@ -1,12 +1,12 @@
 # ============================================================================
-# PATCH per pipeline_step8.run_full_pipeline
+# PATCH per pipeline.run_full_pipeline
 # Incolla questo blocco DOPO la valutazione del random baseline
 # (dopo `random_eval = evaluate_policy_multi_day(...)`) e PRIMA del
 # `return FullPipelineResult(...)`.
 # ============================================================================
 
 # --- import in cima al file ---
-from ppo_comparison import train_ppo_policy, make_rllib_policy_fn
+from marl_ppo import train_ppo_policy, make_rllib_policy_fn
 
 # --- nuovi parametri della firma di run_full_pipeline ---
 #     ppo_iterations: int = 200,

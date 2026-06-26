@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-ppo_convergence.py — raccolta metriche di convergenza PPO + grafici dedicati.
+marl_metrics.py — raccolta metriche di convergenza PPO + grafici dedicati.
 
 Due cose:
 
 1) `train_loop_rich(algo, n_iterations, policy_id, ...)`
-   Drop-in replacement di mappo_trainer.train_loop che, oltre a
+   Drop-in replacement di marl_trainer.train_loop che, oltre a
    reward/timesteps/elapsed, estrae a OGNI iterazione le metriche interne del
    learner PPO (policy loss, vf loss, entropy, KL, explained variance,
    total loss, e — se presente — bc_kl/bc_kl_beta del Fix B) e i timer
@@ -14,7 +14,7 @@ Due cose:
    `episode_reward_mean`.
 
 2) Funzioni di plotting (PNG+PDF, stesso stile delle altre figure del paper)
-   da chiamare in analysis_step8.make_paper_charts:
+   da chiamare in analysis.make_paper_charts:
      - plot_ppo_convergence_panel : 6 pannelli (reward, policy loss, vf loss,
        entropy, KL+bc_kl, explained var) per vanilla e warm su stesso asse iter
      - plot_training_time_breakdown : barre impilate dei tempi (demo gen,

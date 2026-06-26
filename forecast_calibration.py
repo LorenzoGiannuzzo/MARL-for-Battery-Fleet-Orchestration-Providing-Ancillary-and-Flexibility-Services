@@ -74,7 +74,7 @@ class OrnsteinUhlenbeckFit:
     Equivalently AR(1) in the form X_{t+1} = phi * X_t + c + eps'
     with phi = 1 - theta and c = theta * mu.
 
-    NB: the existing `OrnsteinUhlenbeckNoise` in drl_flexibility_analysis.py
+    NB: the existing `OrnsteinUhlenbeckNoise` in legacy_degradation.py
     hardcodes mu = 0. To use these fitted parameters with a non-zero mean,
     extend that class to accept mu as a constructor argument.
     """

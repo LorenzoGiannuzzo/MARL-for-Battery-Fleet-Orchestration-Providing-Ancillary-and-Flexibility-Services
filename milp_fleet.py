@@ -2,7 +2,7 @@
 Multi-BESS MILP optimiser, BSP/UVAM aggregator framing.
 
 Step 1 of the multi-agent track. Extends the single-BESS MILP in
-`milp_optimizer.py` to N heterogeneous batteries coordinated by a single
+`milp_single.py` to N heterogeneous batteries coordinated by a single
 BSP (Balancing Service Provider). The BSP places aggregate bids for the
 ARERA flexibility services, then internally allocates the awarded capacity
 across constituent BESS.
@@ -42,8 +42,8 @@ from typing import Dict, List, Optional
 
 import pulp
 
-from milp_optimizer import BatteryParameters
-from flexibility_market import FlexibilityService, ServiceType
+from milp_single import BatteryParameters
+from markets import FlexibilityService, ServiceType
 
 
 # ============================================================================
@@ -333,7 +333,7 @@ class MultiBESSMILPOptimizer:
         self.mfrr_sustain_hours = float(mfrr_sustain_hours)
         # Commitment market model (Step E). enable_commitments adds a formal
         # expected non-delivery penalty term to the objective, for symmetry
-        # with the env's reward (multi_bess_env, Steps C/D). Because A_s <= R_s
+        # with the env's reward (marl_env, Steps C/D). Because A_s <= R_s
         # and the sustain constraints guarantee the reserved capacity is always
         # deliverable, this penalty is structurally zero at the MILP optimum;
         # it is included so the MILP and the env optimise the SAME objective
@@ -372,7 +372,7 @@ class MultiBESSMILPOptimizer:
         # Pre-compute per-BESS linear cost rate (EUR/MWh) from physics
         self._physics_rates_eur_per_mwh: Optional[List[float]] = None
         if use_nonlinear_degradation:
-            from degradation_model import LFPBatteryState
+            from degradation import LFPBatteryState
             self._physics_rates_eur_per_mwh = []
             for i, bp in enumerate(multi_params.batteries):
                 state = LFPBatteryState(capacity_mwh=bp.capacity_mwh)

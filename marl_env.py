@@ -57,10 +57,10 @@ import numpy as np
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
-from milp_optimizer import BatteryParameters
-from milp_optimizer_multi import MultiBatteryParameters
-from flexibility_market import FlexibilityService, ServiceType
-from degradation_model import LFPBatteryState, LFPDegradationParameters
+from milp_single import BatteryParameters
+from milp_fleet import MultiBatteryParameters
+from markets import FlexibilityService, ServiceType
+from degradation import LFPBatteryState, LFPDegradationParameters
 
 
 # ============================================================================
@@ -455,7 +455,7 @@ class MultiBESSEnv(ParallelEnv):
         # upward, downward, or neither. This enforces operational mutex: for
         # any hour the system can only be called in ONE direction, matching
         # MSD reality. award_probability for up/dn was already mutex-normalised
-        # in italian_market_data.py so P_up_excl + P_dn_excl <= 1.
+        # in market_data.py so P_up_excl + P_dn_excl <= 1.
         directional_awarded_services = None
         if self.directional_services:
             directional_awarded_services = set()
@@ -864,7 +864,7 @@ class MultiBESSEnv(ParallelEnv):
                 # estimated the bidding capacity available for FCR — the env
                 # was accepting bids that would not be qualified for FCR at
                 # the real Terna market. Setting to 4h aligns the env with
-                # both `flexibility_market.py` (min_duration=4) and the MILP
+                # both `markets.py` (min_duration=4) and the MILP
                 # LP, which uses the true sustain via the SOC reserve
                 # constraint. The change makes the PPO learn an FCR strategy
                 # that is realisable in practice, matching what the MILP can

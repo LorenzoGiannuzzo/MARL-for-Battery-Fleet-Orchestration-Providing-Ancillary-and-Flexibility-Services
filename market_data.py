@@ -25,7 +25,7 @@ Step 8 of the multi-agent track. Provides three things:
      pattern from Block 7 (night 0.80, peak 0.30) plus mild seasonal
      drift on capacity prices.
 
-The data here is consumed by pipeline_step8.py for multi-day MILP
+The data here is consumed by pipeline.py for multi-day MILP
 demonstration generation and out-of-sample evaluation of BC and PPO
 policies.
 """
@@ -41,7 +41,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from flexibility_market import FlexibilityService, ServiceType
+from markets import FlexibilityService, ServiceType
 
 
 # ============================================================================

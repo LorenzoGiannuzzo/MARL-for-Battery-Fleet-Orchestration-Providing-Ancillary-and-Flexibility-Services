@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-extra_charts.py — figure aggiuntive per il paper, generate dopo il production run.
+charts_extra.py — figure aggiuntive per il paper, generate dopo il production run.
 
 Cinque famiglie di figure, tutte salvate in PNG (300 dpi) e PDF (vettoriale)
 sotto results/<run_id>/png/ e results/<run_id>/pdf/.
@@ -28,21 +28,21 @@ sotto results/<run_id>/png/ e results/<run_id>/pdf/.
 
 UTILIZZO
 --------
-Le trajectories sono salvate da pipeline_step8 quando si usa
+Le trajectories sono salvate da pipeline quando si usa
 `record_trajectory=True` (gia' attivo). Ma il run di Lorenzo NON salva
 trajectories a disco di default; sono solo in memoria nel `result` object.
 
 Per generare queste figure SENZA rilanciare il pipeline, due opzioni:
- (a) modificare run_paper_experiment.py per aggiungere un torch.save delle
+ (a) modificare main.py per aggiungere un torch.save delle
      trajectories (vedi commento in fondo); poi questo script le carica;
  (b) ri-aggangiarsi al `result` direttamente importando le funzioni e
      passandogli `result.trajectories`. Per questo lo script espone una
      funzione `make_extra_charts(trajectories, output_dir)`.
 
 Per (a):
-  python extra_charts.py results/<run_id>
+  python charts_extra.py results/<run_id>
 
-Per (b): chiamato come callback alla fine di run_paper_experiment.py.
+Per (b): chiamato come callback alla fine di main.py.
 """
 
 from __future__ import annotations
@@ -496,31 +496,31 @@ def make_extra_charts(
     p_max_fleet: float,
 ):
     """Generate all 5 extra charts in one call. Use this from
-    run_paper_experiment.py after run_full_pipeline() returns."""
+    main.py after run_full_pipeline() returns."""
     out_dir = Path(out_dir)
-    print(f"\n[extra_charts] generating into {out_dir}/png + /pdf")
+    print(f"\n[charts_extra] generating into {out_dir}/png + /pdf")
     plot_monthly_revenue_stacked(trajectories, out_dir, start_date)
     plot_activation_duration_vs_intensity(trajectories, out_dir, p_max_fleet)
     plot_annual_carpets(trajectories, out_dir, start_date, metric="soc")
     plot_annual_carpets(trajectories, out_dir, start_date, metric="net")
     plot_profit_vs_degradation_with_throughput(trajectories, out_dir)
-    print(f"[extra_charts] done.")
+    print(f"[charts_extra] done.")
 
 
 def main_cli():
     """Standalone CLI: load trajectories from a pickle and generate charts.
 
     Expects results/<run_id>/trajectories.pkl (need to dump it from
-    run_paper_experiment.py — see the README block at the top of this file).
+    main.py — see the README block at the top of this file).
     """
     if len(sys.argv) < 2:
-        print("usage: python extra_charts.py results/<run_id>")
+        print("usage: python charts_extra.py results/<run_id>")
         print("       (requires trajectories.pkl in that folder)")
         sys.exit(1)
     run_dir = Path(sys.argv[1])
     pkl = run_dir / "trajectories.pkl"
     if not pkl.exists():
-        print(f"ERROR: {pkl} not found. Add this snippet to run_paper_experiment.py")
+        print(f"ERROR: {pkl} not found. Add this snippet to main.py")
         print("right after run_full_pipeline() returns:")
         print()
         print("    import pickle")

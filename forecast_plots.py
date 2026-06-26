@@ -16,7 +16,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import stats
 
-from forecast_error_calibration import RegimeCalibration
+from forecast_calibration import RegimeCalibration
 
 
 # Visual style: keep close to plotting.py conventions in the repo.

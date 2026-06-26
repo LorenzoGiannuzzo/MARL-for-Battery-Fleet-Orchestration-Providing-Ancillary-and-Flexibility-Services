@@ -36,11 +36,11 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 # Project imports
-from milp_optimizer import BatteryParameters
-from milp_optimizer_multi import (MultiBatteryParameters,
+from milp_single import BatteryParameters
+from milp_fleet import (MultiBatteryParameters,
                                    MultiBESSMILPOptimizer)
-from flexibility_market import FlexibilityService, ServiceType
-from multi_bess_env import (MultiBESSEnv, N_ACTION_BINS, ACTION_AXES, OBS_DIM)
+from markets import FlexibilityService, ServiceType
+from marl_env import (MultiBESSEnv, N_ACTION_BINS, ACTION_AXES, OBS_DIM)
 
 warnings.simplefilter("ignore")
 
@@ -58,7 +58,7 @@ warnings.simplefilter("ignore")
 #
 # We match this exactly so weight transfer is a tensor-by-tensor copy.
 # CRITICAL: ENCODER_HIDDEN here MUST equal fcnet_hiddens passed to the PPO
-# (ppo_comparison.train_ppo_policy). If they differ, the encoder tensors are
+# (marl_ppo.train_ppo_policy). If they differ, the encoder tensors are
 # silently skipped on transfer and the warm-start degrades (verify_transfer
 # << 1.0). Both are set to (512, 256).
 
@@ -187,7 +187,7 @@ def generate_expert_demos(
 
         # Solve MILP for this scenario.
         # STRADA B: build the MILP in DIRECTIONAL (5-service) mode with
-        # sustain hours aligned to the env (multi_bess_env._decode_clip_actions):
+        # sustain hours aligned to the env (marl_env._decode_clip_actions):
         #   FCR  4h  (Terna FCR Cooperation; env uses fcr_sustain=4.0)
         #   aFRR 1h, mFRR 2h (env defaults).
         # Previously this constructed the MILP with directional_services=False

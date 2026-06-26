@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-ppo_comparison.py — Aggiunge il PPO (DRL) al confronto MILP vs BC vs PPO.
+marl_ppo.py — Aggiunge il PPO (DRL) al confronto MILP vs BC vs PPO.
 
 Si aggancia ai moduli ESISTENTI senza reinventarli:
-  - mappo_trainer.build_default_config / train_loop  (shared-policy IPPO, Ray RLlib 2.x)
-  - bc_pretraining_multi.transfer_bc_weights_to_algo / verify_transfer (BC->actor)
-  - pipeline_step8.evaluate_policy_multi_day  (stesso accounting di BC e random)
+  - marl_trainer.build_default_config / train_loop  (shared-policy IPPO, Ray RLlib 2.x)
+  - bc.transfer_bc_weights_to_algo / verify_transfer (BC->actor)
+  - pipeline.evaluate_policy_multi_day  (stesso accounting di BC e random)
 
 Espone due politiche allenate, valutate con lo STESSO loop env di BC/random:
   - PPO "vanilla"        : critic e actor da zero
@@ -20,14 +20,14 @@ Fix B (ancoraggio KL):
   il critic non si stabilizza, con beta che decade a 0. Vedi bc_kl_anchor.py.
 
   Le metriche di convergenza (policy/vf loss, entropy, KL nativa, bc_kl, beta,
-  timer) sono raccolte da ppo_convergence.train_loop_rich e stashate su
-  algo._lorenzo_training_metrics per i grafici di analysis_step8.
+  timer) sono raccolte da marl_metrics.train_loop_rich e stashate su
+  algo._lorenzo_training_metrics per i grafici di analysis.
 
 NB: gira sulla TUA macchina (Ray + GPU + dati veri). Qui solo il codice.
 
 Uso (dentro run_full_pipeline, dopo aver allenato il BC e calcolato test_demo):
 
-    from ppo_comparison import train_ppo_policy, make_rllib_policy_fn
+    from marl_ppo import train_ppo_policy, make_rllib_policy_fn
 
     ppo_vanilla = train_ppo_policy(fleet, n_iterations=..., bc_net=None,
                                    use_nonlinear_degradation=use_nonlinear_degradation)
@@ -52,11 +52,11 @@ from typing import Optional, Dict, Any
 
 import numpy as np
 
-from mappo_trainer import (
+from marl_trainer import (
     build_default_config, train_loop, register_multi_bess_env,
     SHARED_POLICY_ID,
 )
-from bc_pretraining_multi import (
+from bc import (
     BCPolicyNet, transfer_bc_weights_to_algo, verify_transfer,
 )
 
@@ -80,7 +80,7 @@ def train_ppo_policy(
     directional_services: bool = False,
     # --- Capacity/rollout overrides — Windows-safe AND BC-compatible ---
     # CRITICAL: fcnet_hiddens MUST match the BC network architecture
-    # (BCPolicyNet ENCODER_HIDDEN in bc_pretraining_multi.py). If they
+    # (BCPolicyNet ENCODER_HIDDEN in bc.py). If they
     # differ, transfer_bc_weights_to_algo silently skips the mismatched
     # encoder tensors and the "warm-start" becomes mostly random.
     # Symptom in the log: "BC tensor(s) not transferred" + low overall
@@ -168,7 +168,7 @@ def train_ppo_policy(
             # fixed OBS_DIM=26 here builds the wrong-shaped probe and the check
             # fails with a shape-mismatch ("1x26 and 410x512") even though the
             # transfer itself was fine. bc_net.obs_dim is always correct.
-            from multi_bess_env import OBS_DIM
+            from marl_env import OBS_DIM
             probe_dim = int(getattr(bc_net, "obs_dim", OBS_DIM))
             obs_samples = np.random.uniform(-1, 1, size=(256, probe_dim)).astype(np.float32)
             vt = verify_transfer(bc_net, algo, SHARED_POLICY_ID, obs_samples)
@@ -183,11 +183,11 @@ def train_ppo_policy(
     # del learner (policy/vf loss, entropy, KL nativa, bc_kl, beta, timer) per
     # i grafici di convergenza. Retro-compatibile (espone episode_reward_mean).
     try:
-        from ppo_convergence import train_loop_rich
+        from marl_metrics import train_loop_rich
         metrics = train_loop_rich(algo, n_iterations=n_iterations,
                                   policy_id=SHARED_POLICY_ID, verbose=verbose)
     except Exception as exc:
-        # Fallback al train_loop classico se ppo_convergence non è disponibile
+        # Fallback al train_loop classico se marl_metrics non è disponibile
         if verbose:
             print(f"  [ppo] train_loop_rich non disponibile ({exc}); uso train_loop")
         metrics = train_loop(algo, n_iterations=n_iterations)
@@ -216,7 +216,7 @@ def make_rllib_policy_fn(algo, policy_id: str = SHARED_POLICY_ID,
     Generator invece dello stato globale np.random, per riproducibilità."""
     module = algo.get_module(policy_id)
     import torch
-    from multi_bess_env import N_ACTION_BINS, ACTION_AXES, ACTION_AXES_DIRECTIONAL
+    from marl_env import N_ACTION_BINS, ACTION_AXES, ACTION_AXES_DIRECTIONAL
     n_axes = ACTION_AXES_DIRECTIONAL if directional_services else ACTION_AXES
     _choice = rng.choice if rng is not None else np.random.choice
 

@@ -817,14 +817,14 @@ def _collect_inference_timings(result) -> Optional[Dict[str, list]]:
         import numpy as _np
         import torch as _torch
         from datetime import datetime as _dt
-        from milp_optimizer import BatteryParameters as _BP
-        from milp_optimizer_multi import (
+        from milp_single import BatteryParameters as _BP
+        from milp_fleet import (
             MultiBatteryParameters as _MBP,
             MultiBESSMILPOptimizer as _MILP)
-        from italian_market_data import (
+        from market_data import (
             build_yearly_service_catalog as _bcat)
-        from bc_pretraining_multi import BCPolicyNet as _BCN
-        from multi_bess_env import OBS_DIM as _OBS_DIM
+        from bc import BCPolicyNet as _BCN
+        from marl_env import OBS_DIM as _OBS_DIM
 
         fleet_sizes = [3, 10, 50]
         milp_ms = []

@@ -35,7 +35,7 @@ baseline because it's simpler, faster, and competitive.
 
 Run:
 
-    from mappo_trainer import build_trainer, train_loop
+    from marl_trainer import build_trainer, train_loop
     cfg = build_default_config(n_batteries=5, episode_hours=24)
     algo = cfg.build_algo()
     results = train_loop(algo, n_iterations=200)
@@ -57,9 +57,9 @@ from ray.rllib.env import ParallelPettingZooEnv
 from ray.tune.registry import register_env
 
 # Project imports
-from milp_optimizer import BatteryParameters
-from milp_optimizer_multi import MultiBatteryParameters
-from multi_bess_env import MultiBESSEnv
+from milp_single import BatteryParameters
+from milp_fleet import MultiBatteryParameters
+from marl_env import MultiBESSEnv
 
 warnings.simplefilter("ignore")
 

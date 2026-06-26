@@ -9,8 +9,8 @@ from typing import List, Dict, Optional, Tuple
 import numpy as np
 import pulp
 import copy
-from flexibility_market import FlexibilityMarket, FlexibilityService, BatteryState, ServiceType
-from italian_market_config import ITALIAN_CONFIG
+from markets import FlexibilityMarket, FlexibilityService, BatteryState, ServiceType
+from market_config import ITALIAN_CONFIG
 
 
 @dataclass
@@ -28,7 +28,7 @@ class BatteryParameters:
     # The factor (2 * cycle_life) amortizes the replacement cost over the total energy
     # throughput in lifetime (each full cycle = 2 * capacity_mwh of throughput).
     # The original MILP missed this factor and over-penalized degradation by 12000x
-    # relative to the PPO environment in drl_flexibility_analysis.py.
+    # relative to the PPO environment in legacy_degradation.py.
 
 
 @dataclass
@@ -85,16 +85,16 @@ class MILPOptimizer:
     Optimizes simultaneous arbitrage and flexibility services
     """
 
-    def __init__(self, battery_params: BatteryParameters, flexibility_market: FlexibilityMarket):
+    def __init__(self, battery_params: BatteryParameters, markets: FlexibilityMarket):
         """
         Initialize MILP optimizer
 
         Args:
             battery_params: Battery system parameters
-            flexibility_market: Flexibility market model (should be deterministic)
+            markets: Flexibility market model (should be deterministic)
         """
         self.battery_params = battery_params
-        self.flexibility_market = flexibility_market
+        self.markets = markets
 
         # Solver configuration
         self.solver = pulp.PULP_CBC_CMD(msg=0)  # Use CBC solver with no output
@@ -431,7 +431,7 @@ class MILPOptimizer:
             # ==================== BATTERY DEGRADATION COST ====================
             # Degradation cost based on total energy throughput.
             # BUG FIX: amortize replacement cost over (2 * cycle_life) MWh of throughput.
-            # This matches the formula used in drl_flexibility_analysis.py and in the
+            # This matches the formula used in legacy_degradation.py and in the
             # extended/enhanced PPO environments:
             #     degradation_cost = MWh * degradation_cost_per_mwh / (2 * cycle_life)
 
@@ -643,7 +643,7 @@ class MILPOptimizer:
             import sys
             import os
             sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-            from drl_flexibility_analysis import degradation
+            from legacy_degradation import degradation
 
             # Calculate equivalent cycles
             cycles_equivalent = total_energy_throughput / (2 * self.battery_params.capacity_mwh)
@@ -925,7 +925,7 @@ class MILPOptimizer:
 def create_default_battery_params() -> BatteryParameters:
     """Create default battery parameters for Italian BESS"""
     # Use the same degradation cost as the existing PPO system for consistency
-    # From drl_flexibility_analysis.py: DEGRADATION_COST_PER_MWH = 25000
+    # From legacy_degradation.py: DEGRADATION_COST_PER_MWH = 25000
     return BatteryParameters(
         capacity_mwh=4.0,
         max_power_mw=2.0,

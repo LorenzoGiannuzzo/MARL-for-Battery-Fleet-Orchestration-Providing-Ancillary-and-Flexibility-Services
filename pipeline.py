@@ -4,12 +4,12 @@ End-to-end pipeline for the multi-agent BSP paper.
 Step 8 of the multi-agent track. Ties together:
 
   - Italian market data (real or synthetic) over a contiguous date range,
-    from `italian_market_data.py`.
+    from `market_data.py`.
   - Multi-day MILP demonstration generation with ROLLING-FCE state across
     days: each day's MILP inherits the SOC and cumulative throughput from
     the previous day, so the fleet ages realistically across the year.
   - Behavioural cloning training on the pooled expert dataset, using the
-    shared-policy BC machinery from `bc_pretraining_multi.py`.
+    shared-policy BC machinery from `bc.py`.
   - Out-of-sample evaluation on held-out test days, comparing:
       A) MILP optimum (oracle baseline)
       B) BC-trained policy (deployable policy)
@@ -42,15 +42,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from milp_optimizer import BatteryParameters
-from milp_optimizer_multi import (MultiBatteryParameters,
+from milp_single import BatteryParameters
+from milp_fleet import (MultiBatteryParameters,
                                    MultiBESSMILPOptimizer)
-from multi_bess_env import MultiBESSEnv, N_ACTION_BINS, ACTION_AXES, ACTION_AXES_DIRECTIONAL
-from bc_pretraining_multi import (BCPolicyNet, train_bc,
+from marl_env import MultiBESSEnv, N_ACTION_BINS, ACTION_AXES, ACTION_AXES_DIRECTIONAL
+from bc import (BCPolicyNet, train_bc,
                                     _discretise_milp_action)
-from italian_market_data import (MarketWindow, make_synthetic_market_window,
+from market_data import (MarketWindow, make_synthetic_market_window,
                                    PUN2024Calibration, ServiceCalibration)
-from degradation_model import LFPBatteryState
+from degradation import LFPBatteryState
 
 warnings.simplefilter("ignore")
 
@@ -211,7 +211,7 @@ def generate_multi_day_expert_demos(
 
         # Build the day's MILP with current rolling state.
         # STRADA B: pass sustain hours explicitly so the MILP plans in the SAME
-        # world the env evaluates in. The env (multi_bess_env._decode_clip_actions)
+        # world the env evaluates in. The env (marl_env._decode_clip_actions)
         # uses fcr_sustain=4.0, afrr_sustain=1.0, mfrr_sustain=2.0. The MILP
         # constructor defaults fcr_sustain_hours to 0.25, so without this the
         # MILP planned FCR for 15 min while the env required 4 h, letting the
@@ -297,7 +297,7 @@ def generate_multi_day_expert_demos(
 
         # Discretise the MILP solution into per-(BESS, hour) actions
         action_sequence: List[Dict[str, np.ndarray]] = []
-        from bc_pretraining_multi import _discretise_milp_action_directional
+        from bc import _discretise_milp_action_directional
         for t in range(24):
             actions_t = {}
             for i in range(N):
@@ -384,7 +384,7 @@ def generate_multi_day_expert_demos(
                 traj_bid_mfrr_dn_mw.append(bid_mdn)
                 traj_price.append(prices_day[t])
                 # Per-service energy prices for this hour
-                from flexibility_market import ServiceType as _ST
+                from markets import ServiceType as _ST
                 price_lookup = {s.service_type: s.energy_price
                                 for s in services_day[t]}
                 traj_price_fcr.append(float(price_lookup.get(_ST.FCR, 0.0)))
@@ -677,7 +677,7 @@ def evaluate_policy_multi_day(
                 traj_bid_mfrr_dn_mw.append(bid_mdn)
                 traj_price.append(prices_day[hour])
                 # Per-service energy prices for this hour
-                from flexibility_market import ServiceType as _ST_eval
+                from markets import ServiceType as _ST_eval
                 price_lookup = {s.service_type: s.energy_price
                                 for s in services_day[hour]}
                 traj_price_fcr.append(float(price_lookup.get(_ST_eval.FCR, 0.0)))
@@ -867,17 +867,17 @@ class FullPipelineResult:
     decomposition: Optional[Dict[str, Dict[str, float]]] = None
 
     # Hourly trajectories for each policy on the test window (populated when
-    # the eval functions record them). Used by analysis_step8 for terminal
+    # the eval functions record them). Used by analysis for terminal
     # reports and chart generation. Keys: "milp", "bc", "ppo_vanilla",
     # "ppo_bc", "random".
     trajectories: Optional[Dict[str, Dict[str, Any]]] = None
 
     # PPO training learning curves (per-iteration mean episode reward) for
-    # the analysis_step8 chart generator. Keys: "ppo_vanilla", "ppo_bc".
+    # the analysis chart generator. Keys: "ppo_vanilla", "ppo_bc".
     ppo_training_metrics: Optional[Dict[str, list]] = None
 
     # Full BC training history (per-epoch train_loss + val_acc_per_axis), for
-    # the BC training curves chart in analysis_step8.
+    # the BC training curves chart in analysis.
     bc_history: Optional[List[Dict[str, Any]]] = None
 
     # MILP expert demonstrations on the train window (obs+actions). Exposed
@@ -959,7 +959,7 @@ def run_full_pipeline(
     # Build train and test market windows
     print(f"[pipeline] building market windows: train={train_days}d, test={test_days}d")
     if real_pun_xlsx_path is not None:
-        from italian_market_data import make_market_window_from_real_pun
+        from market_data import make_market_window_from_real_pun
         train_window = make_market_window_from_real_pun(
             start_date=train_start, end_date=test_start,
             pun_xlsx_path=real_pun_xlsx_path,
@@ -1027,7 +1027,7 @@ def run_full_pipeline(
           f"acc per axis: {[round(a, 3) for a in history[-1]['val_acc_per_axis']]}")
 
     # Pre-compute BC predictions on the entire train demo set (for the
-    # BC-vs-MILP action confusion-matrix chart in analysis_step8). Cheap
+    # BC-vs-MILP action confusion-matrix chart in analysis). Cheap
     # single batch forward pass; predictions are deterministic argmax.
     try:
         import torch as _torch
@@ -1111,7 +1111,7 @@ def run_full_pipeline(
     ppo_results: Dict[str, Any] = {}
     ppo_training_metrics: Dict[str, list] = {}
     if run_ppo_vanilla or run_ppo_bc_warmstart:
-        from ppo_comparison import train_ppo_policy, make_rllib_policy_fn
+        from marl_ppo import train_ppo_policy, make_rllib_policy_fn
     if run_ppo_vanilla:
         print(f"[pipeline] PPO vanilla: {ppo_iterations} iters on train window...")
         algo_v = train_ppo_policy(
