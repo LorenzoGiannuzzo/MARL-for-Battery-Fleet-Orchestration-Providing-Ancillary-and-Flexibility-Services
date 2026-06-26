@@ -47,7 +47,7 @@ warnings.simplefilter("ignore")
 # CONFIG - edit this block
 # ============================================================================
 
-SCALE = "smoke"   # one of: "smoke", "medium", "production"
+SCALE = "production"   # one of: "smoke", "medium", "production"
 
 USE_REAL_PUN = True
 REAL_PUN_XLSX_PATH = [

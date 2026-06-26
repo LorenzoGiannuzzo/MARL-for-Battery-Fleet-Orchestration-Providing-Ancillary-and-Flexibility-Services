@@ -74,7 +74,7 @@ from degradation_model import LFPBatteryState, LFPDegradationParameters
 #   2: FCR capacity bid frac  (0..1)
 #   3: aFRR capacity bid frac (0..1)
 #   4: mFRR capacity bid frac (0..1)
-N_ACTION_BINS = 11
+N_ACTION_BINS = 40
 ACTION_AXES = 5
 ACTION_AXES_DIRECTIONAL = 7  # [charge, discharge, FCR, aFRR_up, aFRR_dn, mFRR_up, mFRR_dn]
 _BIN_VALUES = np.linspace(0.0, 1.0, N_ACTION_BINS)  # [0.0, 0.1, ..., 1.0]
