@@ -156,9 +156,11 @@ def print_market_behaviour_report(
         hist = (bin_counts / np.maximum(total_per_axis, 1)) * 100
         out("")
         out("  Action bin distribution per axis (% of all (BESS, hour) decisions):")
-        out("    axis         | bin0   bin1   bin2   bin3   bin4   bin5   bin6   bin7   bin8   bin9   bin10")
+        n_bins_rep = bin_counts.shape[1]
+        header = "    axis         | " + "  ".join(f"bin{b}" for b in range(n_bins_rep))
+        out(header)
         for k, label in enumerate(axis_labels):
-            row = "  ".join(f"{hist[k, b]:>5.1f}" for b in range(11))
+            row = "  ".join(f"{hist[k, b]:>5.1f}" for b in range(n_bins_rep))
             out(f"    {label:<12s} | {row}")
 
         # ---- SOC range ----
@@ -428,7 +430,8 @@ def make_paper_charts(
     fig, axes = plt.subplots(1, n_axes_hist, figsize=(4 * n_axes_hist, 4))
     if n_axes_hist == 1:
         axes = [axes]
-    bins = np.arange(11)
+    n_bins_hist = trajectories[policies[0]]["action_bin_counts"].shape[1]
+    bins = np.arange(n_bins_hist)
     bar_width = 0.8 / len(policies)
     for k, ax_k in enumerate(axes):
         for ip, p in enumerate(policies):
@@ -437,7 +440,7 @@ def make_paper_charts(
             ax_k.bar(bins + ip * bar_width - 0.4, counts / total * 100,
                       bar_width, label=_POLICY_LABELS[p],
                       color=_POLICY_COLORS[p], alpha=0.85)
-        ax_k.set_xlabel("Bin [0=zero, 10=full P_max]")
+        ax_k.set_xlabel(f"Bin [0=zero, {n_bins_hist - 1}=full P_max]")
         ax_k.set_title(axis_labels_hist[k])
         ax_k.set_xticks(bins)
         ax_k.grid(True, alpha=0.3, axis="y")

@@ -134,7 +134,7 @@ def get_scale_config():
             train_start=datetime(2023, 1, 1),
             train_days=365,
             test_days=366,   # 2024 is a leap year
-            bc_n_epochs=50,
+            bc_n_epochs=200,
             bc_batch_size=128,
             bc_lr=1e-3,
             master_seed=42,

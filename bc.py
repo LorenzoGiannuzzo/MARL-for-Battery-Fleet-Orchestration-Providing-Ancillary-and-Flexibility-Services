@@ -53,7 +53,7 @@ warnings.simplefilter("ignore")
 #   tanh
 #   encoder.actor_encoder.net.mlp.2: Linear(512, 256)
 #   tanh
-#   pi.net.mlp.0: Linear(256, N_LOGITS) where N_LOGITS = n_axes * 11 bins
+#   pi.net.mlp.0: Linear(256, N_LOGITS) where N_LOGITS = n_axes * N_ACTION_BINS bins
 #                 (= 77 for the directional 7-axis fleet, 55 for 5-axis)
 #
 # We match this exactly so weight transfer is a tensor-by-tensor copy.
@@ -69,7 +69,7 @@ N_LOGITS = ACTION_AXES * N_ACTION_BINS  # 55
 class BCPolicyNet(nn.Module):
     """PyTorch BC policy network with the same architecture as PPO's actor.
 
-    Forward returns logits of shape (batch, 5, 11). At training time we
+    Forward returns logits of shape (batch, n_axes, N_ACTION_BINS). At training time we
     apply per-axis cross-entropy against the expert action. At inference
     time we take argmax per axis (deterministic) or sample.
     """
