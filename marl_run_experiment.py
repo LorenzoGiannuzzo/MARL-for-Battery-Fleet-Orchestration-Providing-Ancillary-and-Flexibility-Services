@@ -5,7 +5,7 @@ Usage
 -----
 Edit the CONFIG block below to choose the scale you want, then:
 
-    python run_paper_experiment.py
+    python marl_run_experiment.py
 
 Three scales are supported via the SCALE constant:
 
@@ -95,7 +95,7 @@ OUTPUT_DIR = Path("./results")
 def get_scale_config():
     """Return (fleet_builder, pipeline_kwargs) for the chosen scale."""
     from milp_optimizer import BatteryParameters
-    from milp_optimizer_multi import MultiBatteryParameters
+    from marl_milp_continuous import MultiBatteryParameters
 
     if SCALE == "smoke":
         def fleet_builder():
@@ -116,6 +116,7 @@ def get_scale_config():
             master_seed=42,
             full_foresight=True,
             overcommit_penalty=0.5,
+            milp_mode="discrete",
         )
     elif SCALE == "medium":
         def fleet_builder():
@@ -136,6 +137,7 @@ def get_scale_config():
             master_seed=42,
             full_foresight=True,
             overcommit_penalty=0.5,
+            milp_mode="discrete",
         )
     elif SCALE == "production":
         def fleet_builder():
@@ -153,6 +155,7 @@ def get_scale_config():
             master_seed=42,
             full_foresight=True,
             overcommit_penalty=0.5,
+            milp_mode="discrete",
         )
     else:
         raise ValueError(f"unknown SCALE: {SCALE}")
@@ -161,7 +164,7 @@ def get_scale_config():
 
 def main():
     # Lazy imports so the file can be parsed even before deps are installed
-    from pipeline_step8 import run_full_pipeline
+    from marl_pipeline import run_full_pipeline
 
     fleet_builder, pipeline_kwargs = get_scale_config()
     fleet = fleet_builder()
@@ -170,7 +173,7 @@ def main():
     out_dir = OUTPUT_DIR / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Derive test window start (used by extra_charts for calendar axes)
+    # Derive test window start (used by marl_charts for calendar axes)
     test_start = (pipeline_kwargs["train_start"]
                   + timedelta(days=pipeline_kwargs["train_days"]))
 
@@ -364,7 +367,7 @@ def main():
     # ---- Per-policy behavioural analysis (terminal report + charts) ----
     if result.trajectories is not None:
         try:
-            from analysis_step8 import (print_market_behaviour_report,
+            from marl_analysis import (print_market_behaviour_report,
                                           make_paper_charts)
             print()
             print_market_behaviour_report(result.trajectories, fleet,
@@ -378,7 +381,7 @@ def main():
     #      annual SOC/NET carpets, profit-vs-degradation scatter) ----
     if result.trajectories is not None:
         try:
-            from extra_charts import make_extra_charts
+            from marl_charts import make_extra_charts
             p_max_fleet = float(sum(b.max_power_mw for b in fleet.batteries))
             make_extra_charts(
                 result.trajectories,
@@ -387,7 +390,7 @@ def main():
                 p_max_fleet=p_max_fleet,
             )
         except Exception as exc:
-            print(f"[warn] extra_charts step failed: {exc}")
+            print(f"[warn] marl_charts step failed: {exc}")
 
     # ---- Save BC policy weights ----
     # We need to retrain or get the bc_net from the result. Currently the
@@ -396,7 +399,7 @@ def main():
     # extend the pipeline to return the net if you need it).
     print()
     print(f"NOTE: trained BC weights not saved by default.")
-    print(f"      To export, extend pipeline_step8.run_full_pipeline to return")
+    print(f"      To export, extend marl_pipeline.run_full_pipeline to return")
     print(f"      the bc_net object and torch.save it here.")
 
     print()

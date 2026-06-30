@@ -9,7 +9,7 @@ bit-reproducible if ALL of them are pinned:
 
   1. Python's `random`            (rarely used directly, but libraries touch it)
   2. NumPy global RNG             (np.random.choice / uniform in policies &
-                                   marl_trainer fallback sampling)
+                                   mappo_trainer fallback sampling)
   3. PyTorch CPU RNG              (PPO weight init, action sampling)
   4. PyTorch CUDA RNG             (if a GPU is ever used)
   5. RLlib / Ray                  (rollout workers, already via .debugging(seed))

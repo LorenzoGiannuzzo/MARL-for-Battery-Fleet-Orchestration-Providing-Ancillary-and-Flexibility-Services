@@ -9,7 +9,7 @@ Step 8 of the multi-agent track. Ties together:
     days: each day's MILP inherits the SOC and cumulative throughput from
     the previous day, so the fleet ages realistically across the year.
   - Behavioural cloning training on the pooled expert dataset, using the
-    shared-policy BC machinery from `bc_pretraining_multi.py`.
+    shared-policy BC machinery from `marl_bc.py`.
   - Out-of-sample evaluation on held-out test days, comparing:
       A) MILP optimum (oracle baseline)
       B) BC-trained policy (deployable policy)
@@ -43,10 +43,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from milp_optimizer import BatteryParameters
-from milp_optimizer_multi import (MultiBatteryParameters,
+from marl_milp_continuous import (MultiBatteryParameters,
                                    MultiBESSMILPOptimizer)
-from multi_bess_env import MultiBESSEnv, N_ACTION_BINS, ACTION_AXES, ACTION_AXES_DIRECTIONAL
-from bc_pretraining_multi import (BCPolicyNet, train_bc,
+from marl_milp_discrete import MultiBESSMILPOptimizerDiscrete
+from marl_env import MultiBESSEnv, N_ACTION_BINS, ACTION_AXES, ACTION_AXES_DIRECTIONAL
+from marl_bc import (BCPolicyNet, train_bc,
                                     _discretise_milp_action)
 from italian_market_data import (MarketWindow, make_synthetic_market_window,
                                    PUN2024Calibration, ServiceCalibration)
@@ -101,6 +102,7 @@ def generate_multi_day_expert_demos(
     penalty_k: float = 1.5,
     full_foresight: bool = False,
     overcommit_penalty: float = 0.0,
+    milp_mode: str = "continuous",
 ) -> MultiDayDemoResult:
     """Day-by-day MILP demo generation with rolling per-BESS state.
 
@@ -211,7 +213,7 @@ def generate_multi_day_expert_demos(
 
         # Build the day's MILP with current rolling state.
         # STRADA B: pass sustain hours explicitly so the MILP plans in the SAME
-        # world the env evaluates in. The env (multi_bess_env._decode_clip_actions)
+        # world the env evaluates in. The env (marl_env._decode_clip_actions)
         # uses fcr_sustain=4.0, afrr_sustain=1.0, mfrr_sustain=2.0. The MILP
         # constructor defaults fcr_sustain_hours to 0.25, so without this the
         # MILP planned FCR for 15 min while the env required 4 h, letting the
@@ -219,19 +221,49 @@ def generate_multi_day_expert_demos(
         # reservations on roll-out. This is the single remaining MILP<->env
         # mismatch (aFRR/mFRR sustain and directional mode already matched) and
         # is the main driver of the continuous->discrete profit collapse.
-        opt = MultiBESSMILPOptimizer(
-            fleet, None,
-            use_nonlinear_degradation=use_nonlinear_degradation,
-            nonlinear_dod_assumed=nonlinear_dod_assumed,
-            nonlinear_replacement_cost=nonlinear_replacement_cost,
-            fce_cumulative_initial=fce,
-            directional_services=directional_services,
-            fcr_sustain_hours=4.0,
-            afrr_sustain_hours=1.0,
-            mfrr_sustain_hours=2.0,
-            enable_commitments=enable_commitments,
-            penalty_k=penalty_k,
-        )
+        #
+        # milp_mode selects the baseline:
+        #   "continuous" -> MultiBESSMILPOptimizer: continuous power, the
+        #                   solution is projected onto the 40-bin grid AFTER
+        #                   solving (the projection block below). This is the
+        #                   original oracle (paper baseline 1).
+        #   "discrete"   -> MultiBESSMILPOptimizerDiscrete: power axes are
+        #                   constrained to the exact PPO 40-bin grid as native
+        #                   MILP one-hot variables, feasible-by-construction.
+        #                   No post-hoc projection handicap (paper baseline 2).
+        if milp_mode == "discrete":
+            opt = MultiBESSMILPOptimizerDiscrete(
+                fleet, None,
+                use_nonlinear_degradation=use_nonlinear_degradation,
+                nonlinear_dod_assumed=nonlinear_dod_assumed,
+                nonlinear_replacement_cost=nonlinear_replacement_cost,
+                fce_cumulative_initial=fce,
+                directional_services=directional_services,
+                fcr_sustain_hours=4.0,
+                afrr_sustain_hours=1.0,
+                mfrr_sustain_hours=2.0,
+                enable_commitments=enable_commitments,
+                penalty_k=penalty_k,
+                n_action_bins=N_ACTION_BINS,
+            )
+        elif milp_mode == "continuous":
+            opt = MultiBESSMILPOptimizer(
+                fleet, None,
+                use_nonlinear_degradation=use_nonlinear_degradation,
+                nonlinear_dod_assumed=nonlinear_dod_assumed,
+                nonlinear_replacement_cost=nonlinear_replacement_cost,
+                fce_cumulative_initial=fce,
+                directional_services=directional_services,
+                fcr_sustain_hours=4.0,
+                afrr_sustain_hours=1.0,
+                mfrr_sustain_hours=2.0,
+                enable_commitments=enable_commitments,
+                penalty_k=penalty_k,
+            )
+        else:
+            raise ValueError(
+                f"milp_mode must be 'continuous' or 'discrete', got {milp_mode!r}"
+            )
         opt.current_soc = soc_clamped  # carry SOC over, clamped to MILP bounds
         result = opt.optimize(24, prices_day, services_day)
         daily_statuses.append(result.solver_status)
@@ -295,9 +327,14 @@ def generate_multi_day_expert_demos(
             continue
         daily_profits.append(result.net_profit)
 
-        # Discretise the MILP solution into per-(BESS, hour) actions
+        # Discretise the MILP solution into per-(BESS, hour) actions.
+        # For milp_mode="continuous" this projects the continuous solution onto
+        # the 40-bin grid. For milp_mode="discrete" the solution already lies
+        # exactly on the grid (the optimiser pinned every power axis to a bin),
+        # so bin_(x) = round((x/P_max)*39) recovers the same bin and this step
+        # is the IDENTITY: no information is lost, no extra handicap is applied.
         action_sequence: List[Dict[str, np.ndarray]] = []
-        from bc_pretraining_multi import _discretise_milp_action_directional
+        from marl_bc import _discretise_milp_action_directional
         for t in range(24):
             actions_t = {}
             for i in range(N):
@@ -867,17 +904,17 @@ class FullPipelineResult:
     decomposition: Optional[Dict[str, Dict[str, float]]] = None
 
     # Hourly trajectories for each policy on the test window (populated when
-    # the eval functions record them). Used by analysis_step8 for terminal
+    # the eval functions record them). Used by marl_analysis for terminal
     # reports and chart generation. Keys: "milp", "bc", "ppo_vanilla",
     # "ppo_bc", "random".
     trajectories: Optional[Dict[str, Dict[str, Any]]] = None
 
     # PPO training learning curves (per-iteration mean episode reward) for
-    # the analysis_step8 chart generator. Keys: "ppo_vanilla", "ppo_bc".
+    # the marl_analysis chart generator. Keys: "ppo_vanilla", "ppo_bc".
     ppo_training_metrics: Optional[Dict[str, list]] = None
 
     # Full BC training history (per-epoch train_loss + val_acc_per_axis), for
-    # the BC training curves chart in analysis_step8.
+    # the BC training curves chart in marl_analysis.
     bc_history: Optional[List[Dict[str, Any]]] = None
 
     # MILP expert demonstrations on the train window (obs+actions). Exposed
@@ -913,6 +950,7 @@ def run_full_pipeline(
     penalty_k: float = 1.5,
     full_foresight: bool = False,
     overcommit_penalty: float = 0.0,
+    milp_mode: str = "continuous",
 ) -> FullPipelineResult:
     """End-to-end pipeline: data -> MILP demos -> BC training -> evaluation.
 
@@ -1007,6 +1045,7 @@ def run_full_pipeline(
         penalty_k=penalty_k,
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
+            milp_mode=milp_mode,
     )
     print(f"  demos: {train_demo.obs.shape[0]} samples, "
           f"total train MILP profit: {train_demo.total_milp_profit:.2f} EUR, "
@@ -1027,7 +1066,7 @@ def run_full_pipeline(
           f"acc per axis: {[round(a, 3) for a in history[-1]['val_acc_per_axis']]}")
 
     # Pre-compute BC predictions on the entire train demo set (for the
-    # BC-vs-MILP action confusion-matrix chart in analysis_step8). Cheap
+    # BC-vs-MILP action confusion-matrix chart in marl_analysis). Cheap
     # single batch forward pass; predictions are deterministic argmax.
     try:
         import torch as _torch
@@ -1062,6 +1101,7 @@ def run_full_pipeline(
         penalty_k=penalty_k,
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
+            milp_mode=milp_mode,
     )
 
     # BC policy on the test window
@@ -1111,7 +1151,7 @@ def run_full_pipeline(
     ppo_results: Dict[str, Any] = {}
     ppo_training_metrics: Dict[str, list] = {}
     if run_ppo_vanilla or run_ppo_bc_warmstart:
-        from ppo_comparison import train_ppo_policy, make_rllib_policy_fn
+        from marl_ppo_comparison import train_ppo_policy, make_rllib_policy_fn
     if run_ppo_vanilla:
         print(f"[pipeline] PPO vanilla: {ppo_iterations} iters on train window...")
         algo_v = train_ppo_policy(
