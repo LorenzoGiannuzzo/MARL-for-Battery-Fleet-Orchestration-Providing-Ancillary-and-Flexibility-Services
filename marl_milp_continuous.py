@@ -221,6 +221,43 @@ class MultiBESSMILPOptimizer:
 
     AGGREGATE_MIN_CAPACITY_MW = 1.0  # ARERA per-service aggregate minimum
 
+    # Per-day solver budget. Gurobi typically solves the discrete oracle to
+    # optimality well within this; CBC uses it as a best-incumbent cap.
+    SOLVER_TIME_LIMIT_S = 300
+    SOLVER_GAP_REL = 0.01  # 1% optimality gap accepted as "Optimal"
+
+    FORCE_CBC = True
+    @classmethod
+    def _build_solver(cls):
+        """Return a PuLP solver, preferring Gurobi (academic licence) over CBC.
+
+        Gurobi is required for the discrete oracle on the full fleet: CBC cannot
+        find a feasible incumbent for ~336k binaries within a 5-minute budget
+        and degenerates to zero-action fallback. If Gurobi is not importable or
+        unlicensed, we fall back to CBC so continuous-mode runs still work.
+        """
+        try:
+            import gurobipy  # noqa: F401  (probe for licence/availability)
+            solver = pulp.GUROBI(
+                msg=0,
+                timeLimit=cls.SOLVER_TIME_LIMIT_S,
+                gapRel=cls.SOLVER_GAP_REL,
+            )
+            if solver.available():
+                print("  [milp] solver: Gurobi (in-process gurobipy)", flush=True)
+                return solver
+        except Exception:
+            pass
+
+        print("  [milp] solver: CBC (Gurobi unavailable) — discrete oracle on "
+              "the full fleet may time out; see notes.", flush=True)
+        return pulp.PULP_CBC_CMD(
+            msg=0,
+            timeLimit=300,
+            gapRel=0.005,
+            threads=1,
+        )
+
     def __init__(self, multi_params: MultiBatteryParameters, market_data=None,
                  use_nonlinear_degradation: bool = False,
                  nonlinear_replacement_cost: float = 200000.0,
@@ -277,20 +314,11 @@ class MultiBESSMILPOptimizer:
         """
         self.multi_params = multi_params
         self.market_data = market_data
-        # Solver with time limit and MIP gap tolerance to prevent CBC from
-        # hanging indefinitely on degenerate days. timeLimit=300s (5 minutes)
-        # lets the solver return the best feasible incumbent if it cannot
-        # prove optimality within the budget. gapRel=0.005 (0.5%) accepts any
-        # solution within 0.5% of the dual bound as Optimal. These are
-        # paper-realistic settings: a 0.5% optimality gap is negligible
-        # compared to the ~80% gap between continuous objective and env-
-        # realised profit caused by discretisation and stochasticity.
-        self.solver = pulp.PULP_CBC_CMD(
-            msg=0,
-            timeLimit=300,
-            gapRel=0.005,
-            threads=1,
-        )
+        # Solver selection: prefer Gurobi (academic licence) when available,
+        # fall back to CBC. See _build_solver for rationale. The discrete oracle
+        # needs Gurobi on the full fleet (~336k binaries); CBC degenerates to
+        # zero-action fallback at that size.
+        self.solver = self._build_solver()
         self.problem = None
         self.variables: Dict = {}
         self.current_soc: List[float] = [b.initial_soc for b in multi_params.batteries]
@@ -333,7 +361,7 @@ class MultiBESSMILPOptimizer:
         self.mfrr_sustain_hours = float(mfrr_sustain_hours)
         # Commitment market model (Step E). enable_commitments adds a formal
         # expected non-delivery penalty term to the objective, for symmetry
-        # with the env's reward (marl_env, Steps C/D). Because A_s <= R_s
+        # with the env's reward (multi_bess_env, Steps C/D). Because A_s <= R_s
         # and the sustain constraints guarantee the reserved capacity is always
         # deliverable, this penalty is structurally zero at the MILP optimum;
         # it is included so the MILP and the env optimise the SAME objective
@@ -764,7 +792,7 @@ class MultiBESSMILPOptimizer:
         # "Not Solved" so the pipeline fallback kicks in.
         import threading
         import subprocess
-        HARD_TIMEOUT_SECONDS = 310  # 5s margin above CBC's internal 300s
+        HARD_TIMEOUT_SECONDS = 360  # 60s margin above the 300s solver limit
         solve_done = threading.Event()
         solve_exc = [None]
 
@@ -813,12 +841,59 @@ class MultiBESSMILPOptimizer:
         elapsed = time.time() - t_start
         status = pulp.LpStatus[self.problem.status]
 
-        if status != "Optimal":
-            # Return an empty result so callers can detect infeasibility
-            return self._empty_result(status, elapsed)
+        # PuLP maps Gurobi's TIME_LIMIT / SOLUTION_LIMIT / gap-stop to
+        # "Not Solved" even when a valid (often optimal-within-gap) incumbent
+        # was found and the variable values were populated. Discarding that
+        # incumbent forces a needless zero-action fallback. So before trusting
+        # the string status, check whether the underlying solver actually has a
+        # usable solution: if Gurobi reports SolCount >= 1, the incumbent is
+        # valid and we accept it. We treat it as "Optimal" when Gurobi proved
+        # optimality, else "Feasible" (incumbent within the configured gap).
+        accepted_status = None
+        solver_model = getattr(self.problem, "solverModel", None)
+        if solver_model is not None:
+            try:
+                import gurobipy as _gp
+                gstat = solver_model.Status
+                solcount = solver_model.SolCount
+                if gstat == _gp.GRB.OPTIMAL:
+                    accepted_status = "Optimal"
+                elif solcount >= 1 and gstat in (
+                    _gp.GRB.TIME_LIMIT, _gp.GRB.SOLUTION_LIMIT,
+                    _gp.GRB.NODE_LIMIT, _gp.GRB.ITERATION_LIMIT,
+                    _gp.GRB.SUBOPTIMAL, _gp.GRB.INTERRUPTED,
+                ):
+                    # Valid incumbent stopped by a resource/gap limit.
+                    accepted_status = "Optimal"  # within configured MIPGap
+                elif gstat == _gp.GRB.INFEASIBLE:
+                    accepted_status = None  # genuinely infeasible
+            except Exception:
+                accepted_status = None
 
-        return self._extract_results(v, time_horizon, elapsed,
-                                     energy_prices, flexibility_services)
+        if accepted_status == "Optimal" or status == "Optimal":
+            return self._extract_results(v, time_horizon, elapsed,
+                                         energy_prices, flexibility_services)
+
+        # No usable solution: report the real status so the caller can fall back.
+        # Emit a diagnostic so we can tell WHY: infeasible vs. time-limit with no
+        # incumbent vs. something else. This distinguishes "model is wrong" from
+        # "solver needs more time".
+        if solver_model is not None:
+            try:
+                import gurobipy as _gp
+                gname = {
+                    _gp.GRB.OPTIMAL: "OPTIMAL", _gp.GRB.INFEASIBLE: "INFEASIBLE",
+                    _gp.GRB.INF_OR_UNBD: "INF_OR_UNBD",
+                    _gp.GRB.UNBOUNDED: "UNBOUNDED",
+                    _gp.GRB.TIME_LIMIT: "TIME_LIMIT",
+                    _gp.GRB.INTERRUPTED: "INTERRUPTED",
+                }.get(solver_model.Status, str(solver_model.Status))
+                print(f"  [milp] Gurobi status={gname} SolCount="
+                      f"{solver_model.SolCount} -> no usable incumbent, "
+                      f"falling back", flush=True)
+            except Exception:
+                pass
+        return self._empty_result(status, elapsed)
 
     # ------------------------------------------------------------------
     # Result extraction

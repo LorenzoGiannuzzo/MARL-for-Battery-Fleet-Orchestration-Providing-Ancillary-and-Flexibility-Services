@@ -107,7 +107,7 @@ def get_scale_config():
             train_start=datetime(2024, 4, 1),
             train_days=7,
             test_days=3,
-            bc_n_epochs=30,
+            bc_n_epochs=200,
             bc_batch_size=32,
             bc_lr=3e-3,
             enable_commitments=True,
@@ -116,7 +116,7 @@ def get_scale_config():
             master_seed=42,
             full_foresight=True,
             overcommit_penalty=0.5,
-            milp_mode="discrete",
+            milp_mode="continuous",
         )
     elif SCALE == "medium":
         def fleet_builder():
@@ -128,7 +128,7 @@ def get_scale_config():
             train_start=datetime(2024, 4, 1),
             train_days=30,
             test_days=10,
-            bc_n_epochs=50,
+            bc_n_epochs=200,
             bc_batch_size=64,
             bc_lr=1e-3,
             enable_commitments=True,
@@ -137,7 +137,7 @@ def get_scale_config():
             master_seed=42,
             full_foresight=True,
             overcommit_penalty=0.5,
-            milp_mode="discrete",
+            milp_mode="continuous",
         )
     elif SCALE == "production":
         def fleet_builder():
@@ -146,7 +146,7 @@ def get_scale_config():
             train_start=datetime(2023, 1, 1),
             train_days=365,
             test_days=366,   # 2024 is a leap year
-            bc_n_epochs=50,
+            bc_n_epochs=200,
             bc_batch_size=128,
             bc_lr=1e-3,
             enable_commitments=True,
@@ -155,7 +155,7 @@ def get_scale_config():
             master_seed=42,
             full_foresight=True,
             overcommit_penalty=0.5,
-            milp_mode="discrete",
+            milp_mode="continuous",
         )
     else:
         raise ValueError(f"unknown SCALE: {SCALE}")
@@ -173,7 +173,7 @@ def main():
     out_dir = OUTPUT_DIR / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Derive test window start (used by marl_charts for calendar axes)
+    # Derive test window start (used by extra_charts for calendar axes)
     test_start = (pipeline_kwargs["train_start"]
                   + timedelta(days=pipeline_kwargs["train_days"]))
 
@@ -390,7 +390,7 @@ def main():
                 p_max_fleet=p_max_fleet,
             )
         except Exception as exc:
-            print(f"[warn] marl_charts step failed: {exc}")
+            print(f"[warn] extra_charts step failed: {exc}")
 
     # ---- Save BC policy weights ----
     # We need to retrain or get the bc_net from the result. Currently the
