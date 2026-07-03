@@ -93,7 +93,9 @@ def train_ppo_policy(
     # so the transfer is now clean (verify_transfer == 1.0) AND the winning
     # PPO capacity is restored. Keep these two in lock-step.
     fcnet_hiddens=(512, 256),
-    train_batch_size: int = 4000,
+    # train_batch_size reduced 4000 -> 2000 to halve per-iteration memory
+    # (410-dim full-foresight obs). 4000 exhausted the 8 GB machine.
+    train_batch_size: int = 2000,
     rollout_fragment_length: int = 200,
     enable_commitments: bool = False,
     commitment_lead_time: int = 24,
@@ -102,6 +104,19 @@ def train_ppo_policy(
     overcommit_penalty: float = 0.0,
 ):
     """Allena una shared-policy PPO sul MultiBESSEnv e restituisce l'algo RLlib."""
+    # Windows/low-RAM: force Ray local_mode (no raylet, no separate object
+    # store) to avoid the per-iteration shared-memory leak that kills the
+    # raylet (CreateFileMapping 1450/1455). No object_store cap (that once
+    # caused a "-0.0 GB available" init error). Pairs with num_env_runners=0.
+    import ray
+    if not ray.is_initialized():
+        ray.init(
+            local_mode=True,
+            ignore_reinit_error=True,
+            logging_level="ERROR",
+            log_to_driver=False,
+            include_dashboard=False,
+        )
     register_multi_bess_env()
 
     cfg = build_default_config(
@@ -182,7 +197,7 @@ def train_ppo_policy(
         metrics = train_loop_rich(algo, n_iterations=n_iterations,
                                   policy_id=SHARED_POLICY_ID, verbose=verbose)
     except Exception as exc:
-        # Fallback al train_loop classico se marl_ppo_convergence non è disponibile
+        # Fallback al train_loop classico se ppo_convergence non è disponibile
         if verbose:
             print(f"  [ppo] train_loop_rich non disponibile ({exc}); uso train_loop")
         metrics = train_loop(algo, n_iterations=n_iterations)

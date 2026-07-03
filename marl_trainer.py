@@ -164,7 +164,11 @@ def build_default_config(
     lambda_: float = 0.95,
     clip_param: float = 0.2,
     entropy_coeff: float = 0.001,
-    num_env_runners: int = 1,
+    # num_env_runners=0 => in-process rollouts, no separate Ray worker.
+    # On Windows/8 GB the worker's shared-memory object store leaks each
+    # iteration and the raylet dies (CreateFileMapping GetLastError 1450/1455).
+    # In-process rollout is the only stable setting here.
+    num_env_runners: int = 0,
     rollout_fragment_length: int = 200,
     fcnet_hiddens: Tuple[int, ...] = (512, 256),
     directional_services: bool = False,
