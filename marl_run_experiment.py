@@ -152,7 +152,7 @@ def get_scale_config():
             enable_commitments=True,
             commitment_lead_time=24,
             penalty_k=1.5,
-            master_seed=42,
+            master_seed=37,
             full_foresight=True,
             overcommit_penalty=0.5,
             milp_mode="continuous",

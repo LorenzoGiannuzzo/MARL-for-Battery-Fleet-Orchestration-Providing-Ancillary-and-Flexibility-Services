@@ -104,19 +104,12 @@ def train_ppo_policy(
     overcommit_penalty: float = 0.0,
 ):
     """Allena una shared-policy PPO sul MultiBESSEnv e restituisce l'algo RLlib."""
-    # Windows/low-RAM: force Ray local_mode (no raylet, no separate object
-    # store) to avoid the per-iteration shared-memory leak that kills the
-    # raylet (CreateFileMapping 1450/1455). No object_store cap (that once
-    # caused a "-0.0 GB available" init error). Pairs with num_env_runners=0.
-    import ray
-    if not ray.is_initialized():
-        ray.init(
-            local_mode=True,
-            ignore_reinit_error=True,
-            logging_level="ERROR",
-            log_to_driver=False,
-            include_dashboard=False,
-        )
+    # NOTE on Ray init: we deliberately do NOT call ray.init() here. Earlier runs
+    # worked when RLlib auto-initialised Ray with its own defaults; every custom
+    # ray.init we tried (object_store cap, local_mode) broke on this Windows / Ray
+    # version. The real fix for the per-iteration memory growth is
+    # num_env_runners=0 (set in build_default_config), which keeps rollouts in the
+    # main process with no separate worker actor. Let RLlib handle Ray itself.
     register_multi_bess_env()
 
     cfg = build_default_config(
