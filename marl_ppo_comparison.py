@@ -93,15 +93,18 @@ def train_ppo_policy(
     # so the transfer is now clean (verify_transfer == 1.0) AND the winning
     # PPO capacity is restored. Keep these two in lock-step.
     fcnet_hiddens=(512, 256),
-    # train_batch_size reduced 4000 -> 2000 to halve per-iteration memory
-    # (410-dim full-foresight obs). 4000 exhausted the 8 GB machine.
-    train_batch_size: int = 2000,
+    # train_batch_size=4000: restored to the value used in the 14M run.
+    # NB: was temporarily lowered to 2000 for the 410-dim full-foresight OOM on
+    # an 8 GB machine; keep 4000 only if memory allows (fewer BESS, no 410-dim
+    # obs, or more free RAM), otherwise it may OOM again.
+    train_batch_size: int = 4000,
     rollout_fragment_length: int = 200,
     enable_commitments: bool = False,
     commitment_lead_time: int = 24,
     penalty_k: float = 1.5,
     full_foresight: bool = False,
     overcommit_penalty: float = 0.0,
+    expected_reward_training: bool = False,
 ):
     """Allena una shared-policy PPO sul MultiBESSEnv e restituisce l'algo RLlib."""
     # NOTE on Ray init: we deliberately do NOT call ray.init() here. Earlier runs
@@ -126,6 +129,7 @@ def train_ppo_policy(
         penalty_k=penalty_k,
         full_foresight=full_foresight,
         overcommit_penalty=overcommit_penalty,
+        expected_reward_training=expected_reward_training,
     )
 
     is_warm = bc_net is not None

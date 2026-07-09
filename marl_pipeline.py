@@ -155,7 +155,7 @@ def generate_multi_day_expert_demos(
     traj_actions_mean = []
     traj_soc_mean = []; traj_soc_min = []; traj_soc_max = []
     traj_soh_mean = []; traj_soh_min = []; traj_soh_max = []
-    traj_arbitrage = []; traj_flex = []; traj_deg = []
+    traj_arbitrage = []; traj_flex = []; traj_deg = []; traj_penalty = []
     # Per-service revenue trajectory buffers (filled from env.last_aggregate_info).
     # In directional mode we track 5 services; in legacy mode, 3.
     traj_rev_fcr = []; traj_rev_afrr_up = []; traj_rev_afrr_dn = []
@@ -448,9 +448,12 @@ def generate_multi_day_expert_demos(
                 hour_arb = sum(infos[a]['arbitrage'] for a in infos if isinstance(infos[a], dict))
                 hour_flex = sum(infos[a]['flex_revenue'] for a in infos if isinstance(infos[a], dict))
                 hour_deg = sum(infos[a]['degradation'] for a in infos if isinstance(infos[a], dict))
+                hour_pen = sum(infos[a].get('non_delivery_penalty', 0.0) + infos[a].get('overcommit_penalty', 0.0)
+                               for a in infos if isinstance(infos[a], dict))
                 traj_arbitrage.append(hour_arb)
                 traj_flex.append(hour_flex)
                 traj_deg.append(hour_deg)
+                traj_penalty.append(hour_pen)
                 # Per-service revenue from env.last_aggregate_info
                 agg = getattr(env, 'last_aggregate_info', {}) or {}
                 traj_rev_fcr.append(float(agg.get('rev_fcr', 0.0)))
@@ -490,6 +493,7 @@ def generate_multi_day_expert_demos(
             "arbitrage_per_hour": np.array(traj_arbitrage, dtype=np.float32),
             "flex_per_hour": np.array(traj_flex, dtype=np.float32),
             "deg_per_hour": np.array(traj_deg, dtype=np.float32),
+            "penalty_per_hour": np.array(traj_penalty, dtype=np.float32),
             "bid_fcr_mw_per_hour": np.array(traj_bid_fcr_mw, dtype=np.float32),
             "bid_afrr_mw_per_hour": np.array(traj_bid_afrr_mw, dtype=np.float32),
             "bid_mfrr_mw_per_hour": np.array(traj_bid_mfrr_mw, dtype=np.float32),
@@ -950,6 +954,7 @@ def run_full_pipeline(
     penalty_k: float = 1.5,
     full_foresight: bool = False,
     overcommit_penalty: float = 0.0,
+    expected_reward_training: bool = False,
     milp_mode: str = "continuous",
 ) -> FullPipelineResult:
     """End-to-end pipeline: data -> MILP demos -> BC training -> evaluation.
@@ -1163,6 +1168,7 @@ def run_full_pipeline(
             penalty_k=penalty_k,
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
+            expected_reward_training=expected_reward_training,
         )
         ppo_training_metrics["ppo_vanilla"] = [
             float(m.get("episode_reward_mean", 0.0) or 0.0)
@@ -1202,6 +1208,7 @@ def run_full_pipeline(
             penalty_k=penalty_k,
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
+            expected_reward_training=expected_reward_training,
         )
         ppo_training_metrics["ppo_bc"] = [
             float(m.get("episode_reward_mean", 0.0) or 0.0)

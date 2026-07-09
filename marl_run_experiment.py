@@ -151,10 +151,11 @@ def get_scale_config():
             bc_lr=1e-3,
             enable_commitments=True,
             commitment_lead_time=24,
-            penalty_k=1.5,
-            master_seed=37,
+            penalty_k=3.0,
+            master_seed=42,
             full_foresight=True,
-            overcommit_penalty=0.5,
+            overcommit_penalty=1.5,
+            expected_reward_training=True,
             milp_mode="continuous",
         )
     else:

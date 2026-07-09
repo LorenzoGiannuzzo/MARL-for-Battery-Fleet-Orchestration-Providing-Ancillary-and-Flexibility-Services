@@ -129,6 +129,12 @@ def _env_creator(env_config: Dict[str, Any]):
         raw_env.configure_full_foresight(True)
     if env_config.get("overcommit_penalty", 0.0):
         raw_env.configure_overcommit_penalty(env_config.get("overcommit_penalty", 0.0))
+    # Expected-reward mode is a TRAINING-only alignment with the MILP: the PPO
+    # training env books reserve revenues in expectation instead of sampling the
+    # award/activation Bernoullis. The evaluation rollouts (built elsewhere in the
+    # pipeline) never set this, so they still sample real outcomes.
+    if env_config.get("expected_reward_training", False):
+        raw_env.configure_expected_reward(True)
     return ParallelPettingZooEnv(raw_env)
 
 
@@ -177,6 +183,7 @@ def build_default_config(
     penalty_k: float = 1.5,
     full_foresight: bool = False,
     overcommit_penalty: float = 0.0,
+    expected_reward_training: bool = False,
 ) -> PPOConfig:
     """Build a PPOConfig for shared-policy multi-agent training.
 
@@ -212,6 +219,7 @@ def build_default_config(
         penalty_k=penalty_k,
         full_foresight=full_foresight,
         overcommit_penalty=overcommit_penalty,
+        expected_reward_training=expected_reward_training,
     )
 
     config = (
