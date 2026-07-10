@@ -296,6 +296,14 @@ class MultiBESSEnv(ParallelEnv):
         # their penalty is always 0 and the comparison stays fair.
         self.overcommit_penalty: float = float(
             getattr(self, "overcommit_penalty", 0.0))
+        # EXPECTED-REWARD MODE (training-only alignment with the MILP). See
+        # configure_expected_reward(). When True, step() books award/activation
+        # revenues in EXPECTATION instead of sampling the two Bernoulli draws,
+        # giving the PPO the same probabilistic information the MILP has and
+        # removing the lucky-draw incentive behind the overcommit degeneracy.
+        # Evaluation envs keep this False and sample the real market outcomes.
+        self.expected_reward_mode: bool = bool(
+            getattr(self, "expected_reward_mode", False))
         self._commitments: CommitmentTable = CommitmentTable(
             list(self.possible_agents))
 
@@ -335,6 +343,17 @@ class MultiBESSEnv(ParallelEnv):
         beyond available power. Returns self.
         """
         self.overcommit_penalty = float(coeff)
+        return self
+
+    def configure_expected_reward(self, enable: bool = True):
+        """Enable expected-reward mode (training-only). When enabled, step()
+        books reserve award/activation revenues in expectation (weighted by
+        their probabilities), matching the MILP objective, instead of sampling
+        the two Bernoulli draws. Use for the PPO/BC TRAINING env; keep it
+        disabled (default) for the EVALUATION env so it samples the true
+        realized market outcomes. Returns self.
+        """
+        self.expected_reward_mode = bool(enable)
         return self
 
     def configure_full_foresight(self, enable: bool = True):
@@ -513,15 +532,24 @@ class MultiBESSEnv(ParallelEnv):
                 s = services_by_type.get(st)
                 if s is None or agg_bids[st] < 1.0:
                     continue
+                # Award weight: 1.0/0.0 when sampled, award_probability in
+                # EXPECTED-REWARD MODE (training only; matches the MILP).
                 if directional_awarded_services is not None and st != ServiceType.FCR:
-                    awarded = st in directional_awarded_services
+                    aw_w = 1.0 if (st in directional_awarded_services) else 0.0
+                elif self.expected_reward_mode:
+                    aw_w = float(s.award_probability)
                 else:
-                    awarded = self._rng.random() < s.award_probability
-                if not awarded:
+                    aw_w = 1.0 if (self._rng.random() < s.award_probability) else 0.0
+                if aw_w <= 0.0:
                     continue
-                total_cap_payment = s.capacity_price * agg_bids[st]
-                activated = self._rng.random() < s.activation_probability
-                total_energy_payment = (s.energy_price * agg_bids[st]) if activated else 0.0
+                # Activation weight: 1.0/0.0 when sampled, activation_probability
+                # in EXPECTED-REWARD MODE.
+                if self.expected_reward_mode:
+                    act_w = float(s.activation_probability)
+                else:
+                    act_w = 1.0 if (self._rng.random() < s.activation_probability) else 0.0
+                total_cap_payment = s.capacity_price * agg_bids[st] * aw_w
+                total_energy_payment = s.energy_price * agg_bids[st] * aw_w * act_w
                 direction = service_directions[st]
                 per_service_revenue[st] = total_cap_payment + total_energy_payment
 
@@ -529,17 +557,17 @@ class MultiBESSEnv(ParallelEnv):
                     share = (per_agent_bid[a][st] / agg_bids[st]
                               if agg_bids[st] > 0 else 0.0)
                     per_agent_flex[a] += share * (total_cap_payment + total_energy_payment)
-                    if activated:
+                    act_mwh = per_agent_bid[a][st] * aw_w * act_w
+                    if act_mwh > 0:
                         i = self.agent_name_mapping[a]
                         bp = self.multi_params.batteries[i]
                         cap = bp.capacity_mwh
                         eff = bp.efficiency
-                        activated_mwh = per_agent_bid[a][st]
-                        flex_throughput_per_agent[a] += activated_mwh
+                        flex_throughput_per_agent[a] += act_mwh
                         if direction == 'up':
-                            per_agent_dsoc_act[a] -= activated_mwh / (eff * cap)
+                            per_agent_dsoc_act[a] -= act_mwh / (eff * cap)
                         elif direction == 'dn':
-                            per_agent_dsoc_act[a] += (eff * activated_mwh) / cap
+                            per_agent_dsoc_act[a] += (eff * act_mwh) / cap
         else:
             # =============== COMMITMENT PATH (Steps C + D) ===================
             # Two temporally separated flows happen in hour t:
@@ -568,6 +596,21 @@ class MultiBESSEnv(ParallelEnv):
             for st in service_types:
                 s = services_by_type.get(st)
                 if s is None or agg_bids[st] < 1.0:
+                    continue
+                # EXPECTED-REWARD MODE (training only): instead of sampling the
+                # award Bernoulli, register the commitment scaled by the award
+                # probability, so the booked reward equals award_prob * (...),
+                # matching the MILP expectation and removing the "hope for a
+                # lucky award" incentive that was driving overcommitment.
+                if self.expected_reward_mode:
+                    aw_scale = float(s.award_probability)
+                    for a in self.agents:
+                        mw = per_agent_bid[a][st] * aw_scale
+                        if mw > 0:
+                            self._commitments.add(
+                                a, _service_key_for(st), mw,
+                                bid_hour=t, delivery_hour=delivery_hour,
+                            )
                     continue
                 if directional_awarded_services is not None and st != ServiceType.FCR:
                     awarded = st in directional_awarded_services
@@ -612,8 +655,16 @@ class MultiBESSEnv(ParallelEnv):
                     cap_pay = s.capacity_price * c.mw
                     per_agent_flex[a] += cap_pay
                     per_service_revenue[st] = per_service_revenue.get(st, 0.0) + cap_pay
-                    # activation draw in the DELIVERY hour
-                    if self._rng.random() >= s.activation_probability:
+                    # activation in the DELIVERY hour. EXPECTED-REWARD MODE
+                    # (training only): weight by the activation probability
+                    # instead of drawing the Bernoulli, so energy payment, SoC
+                    # movement and non-delivery penalty are booked in
+                    # expectation (matching the MILP). Eval keeps sampling.
+                    if self.expected_reward_mode:
+                        act_w = float(s.activation_probability)
+                    else:
+                        act_w = 1.0 if (self._rng.random() < s.activation_probability) else 0.0
+                    if act_w <= 0.0:
                         continue
                     direction = service_directions.get(st, 'sym')
                     requested_mwh = c.mw  # MW * 1h
@@ -630,25 +681,28 @@ class MultiBESSEnv(ParallelEnv):
                     delivered = min(requested_mwh, deliverable)
                     undelivered = max(0.0, requested_mwh - delivered)
 
-                    # energy payment on what was delivered
-                    pay = energy_price * delivered
+                    # energy payment on what was delivered, weighted by act_w
+                    # (1.0 when sampled-and-activated in eval; activation_prob
+                    # in expected-reward training).
+                    pay = energy_price * delivered * act_w
                     per_agent_flex[a] += pay
                     per_service_revenue[st] = per_service_revenue.get(st, 0.0) + pay
-                    flex_throughput_per_agent[a] += delivered
+                    eff_delivered = delivered * act_w
+                    flex_throughput_per_agent[a] += eff_delivered
                     # Update BOTH the accumulator (applied later) and the local
                     # projection (so the next commitment sees the new headroom).
                     if direction == 'up':
-                        dsoc = -delivered / (eff * cap)
+                        dsoc = -eff_delivered / (eff * cap)
                     elif direction == 'dn':
-                        dsoc = (eff * delivered) / cap
+                        dsoc = (eff * eff_delivered) / cap
                     else:
                         dsoc = 0.0
                     per_agent_dsoc_act[a] += dsoc
                     soc_proj = min(self.soc_max, max(self.soc_min, soc_proj + dsoc))
 
-                    # (D) NON-DELIVERY PENALTY on the shortfall
+                    # (D) NON-DELIVERY PENALTY on the shortfall, weighted by act_w
                     if undelivered > 0:
-                        penalty = self.penalty_k * energy_price * undelivered
+                        penalty = self.penalty_k * energy_price * undelivered * act_w
                         per_agent_flex[a] -= penalty
                         per_service_revenue[st] = per_service_revenue.get(st, 0.0) - penalty
 

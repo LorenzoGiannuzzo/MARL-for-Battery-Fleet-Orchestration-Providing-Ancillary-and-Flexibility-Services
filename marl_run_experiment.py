@@ -117,6 +117,7 @@ def get_scale_config():
             full_foresight=True,
             overcommit_penalty=0.5,
             milp_mode="continuous",
+            expected_reward_training=True
         )
     elif SCALE == "medium":
         def fleet_builder():
@@ -138,6 +139,7 @@ def get_scale_config():
             full_foresight=True,
             overcommit_penalty=0.5,
             milp_mode="continuous",
+            expected_reward_training=True
         )
     elif SCALE == "production":
         def fleet_builder():
