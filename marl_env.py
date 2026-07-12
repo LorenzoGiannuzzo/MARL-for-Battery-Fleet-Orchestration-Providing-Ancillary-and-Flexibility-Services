@@ -298,9 +298,7 @@ class MultiBESSEnv(ParallelEnv):
             getattr(self, "overcommit_penalty", 0.0))
         # EXPECTED-REWARD MODE (training-only alignment with the MILP). See
         # configure_expected_reward(). When True, step() books award/activation
-        # revenues in EXPECTATION instead of sampling the two Bernoulli draws,
-        # giving the PPO the same probabilistic information the MILP has and
-        # removing the lucky-draw incentive behind the overcommit degeneracy.
+        # revenues in EXPECTATION instead of sampling the two Bernoulli draws.
         # Evaluation envs keep this False and sample the real market outcomes.
         self.expected_reward_mode: bool = bool(
             getattr(self, "expected_reward_mode", False))
@@ -597,15 +595,17 @@ class MultiBESSEnv(ParallelEnv):
                 s = services_by_type.get(st)
                 if s is None or agg_bids[st] < 1.0:
                     continue
-                # EXPECTED-REWARD MODE (training only): instead of sampling the
-                # award Bernoulli, register the commitment scaled by the award
-                # probability, so the booked reward equals award_prob * (...),
-                # matching the MILP expectation and removing the "hope for a
-                # lucky award" incentive that was driving overcommitment.
+                # EXPECTED-REWARD MODE (training only). FIX 5: register the
+                # commitment at FULL reserved size, exactly like a won bid, so
+                # locked_power / P_free reflect the true MILP power constraint
+                # (P_ch + P_dis + sum R_s <= P_max). The award-probability
+                # weighting is applied to the PAYMENT at delivery (Step D), NOT
+                # to the reservation. Registering the scaled size here was the
+                # leak: it under-counted locked power and let the PPO stack
+                # phantom reserve that only exists in expectation.
                 if self.expected_reward_mode:
-                    aw_scale = float(s.award_probability)
                     for a in self.agents:
-                        mw = per_agent_bid[a][st] * aw_scale
+                        mw = per_agent_bid[a][st]
                         if mw > 0:
                             self._commitments.add(
                                 a, _service_key_for(st), mw,
@@ -652,14 +652,20 @@ class MultiBESSEnv(ParallelEnv):
                         continue
                     # Capacity payment booked at DELIVERY (Option 3): paid for
                     # being available this hour, regardless of activation.
-                    cap_pay = s.capacity_price * c.mw
+                    # FIX 5: commitment is registered at FULL reserved size, so
+                    # value it by its award probability HERE (aw_w = award_prob
+                    # in expected-reward training, 1.0 in eval where it exists
+                    # only because it was actually won).
+                    if self.expected_reward_mode:
+                        aw_w = float(s.award_probability)
+                    else:
+                        aw_w = 1.0
+                    cap_pay = s.capacity_price * c.mw * aw_w
                     per_agent_flex[a] += cap_pay
                     per_service_revenue[st] = per_service_revenue.get(st, 0.0) + cap_pay
-                    # activation in the DELIVERY hour. EXPECTED-REWARD MODE
-                    # (training only): weight by the activation probability
-                    # instead of drawing the Bernoulli, so energy payment, SoC
-                    # movement and non-delivery penalty are booked in
-                    # expectation (matching the MILP). Eval keeps sampling.
+                    # activation in the DELIVERY hour. EXPECTED-REWARD MODE:
+                    # weight by activation_probability instead of drawing the
+                    # Bernoulli; eval keeps sampling (bit-identical there).
                     if self.expected_reward_mode:
                         act_w = float(s.activation_probability)
                     else:
@@ -681,13 +687,13 @@ class MultiBESSEnv(ParallelEnv):
                     delivered = min(requested_mwh, deliverable)
                     undelivered = max(0.0, requested_mwh - delivered)
 
-                    # energy payment on what was delivered, weighted by act_w
-                    # (1.0 when sampled-and-activated in eval; activation_prob
-                    # in expected-reward training).
-                    pay = energy_price * delivered * act_w
+                    # energy payment weighted by award AND activation
+                    # expectation (w = 1.0 in eval).
+                    w = aw_w * act_w
+                    pay = energy_price * delivered * w
                     per_agent_flex[a] += pay
                     per_service_revenue[st] = per_service_revenue.get(st, 0.0) + pay
-                    eff_delivered = delivered * act_w
+                    eff_delivered = delivered * w
                     flex_throughput_per_agent[a] += eff_delivered
                     # Update BOTH the accumulator (applied later) and the local
                     # projection (so the next commitment sees the new headroom).
@@ -700,9 +706,9 @@ class MultiBESSEnv(ParallelEnv):
                     per_agent_dsoc_act[a] += dsoc
                     soc_proj = min(self.soc_max, max(self.soc_min, soc_proj + dsoc))
 
-                    # (D) NON-DELIVERY PENALTY on the shortfall, weighted by act_w
+                    # (D) NON-DELIVERY PENALTY on the shortfall, weighted by w.
                     if undelivered > 0:
-                        penalty = self.penalty_k * energy_price * undelivered * act_w
+                        penalty = self.penalty_k * energy_price * undelivered * w
                         per_agent_flex[a] -= penalty
                         per_service_revenue[st] = per_service_revenue.get(st, 0.0) - penalty
 
@@ -816,6 +822,16 @@ class MultiBESSEnv(ParallelEnv):
                 'soc': float(self._socs[self.agent_name_mapping[a]]),
                 'soh': float(self._lfp_states[self.agent_name_mapping[a]].soh),
                 'fce': float(self._lfp_states[self.agent_name_mapping[a]].fce_cumulative),
+                # FIX 1 diagnostics: reserve-stacking & overcommit signals so we
+                # can log Sigma(bid)/P_max, how much was clipped, and locked MW.
+                'reserve_bid_mw': float(sum(per_agent_bid[a].values())),
+                'reserve_frac_pmax': float(sum(per_agent_bid[a].values())
+                    / max(self.multi_params.batteries[
+                        self.agent_name_mapping[a]].max_power_mw, 1e-9)),
+                'overcommit_excess': float(per_agent[a].get('overcommit', 0.0)),
+                'overcommit_penalty': float(per_agent_overcommit_pen[a]),
+                'locked_power': float(self._commitments.locked_power(a, t)
+                    if self.enable_commitments else 0.0),
             } for a in self.agents
         }
         # Aggregate diagnostic dict reflecting directional or legacy keys
