@@ -296,6 +296,13 @@ class MultiBESSEnv(ParallelEnv):
         # their penalty is always 0 and the comparison stays fair.
         self.overcommit_penalty: float = float(
             getattr(self, "overcommit_penalty", 0.0))
+        # FIX 6: availability-penalty coefficient. In expected_reward_mode
+        # (training only) the capacity payment is scaled by the deliverable
+        # headroom; this coefficient (default 1.0 = full withholding of the
+        # undeliverable capacity) lets the strength be softened. 0.0 disables
+        # the fix. Eval / MILP replay / BC sample, so they are unaffected.
+        self.availability_penalty_coeff: float = float(
+            getattr(self, "availability_penalty_coeff", 1.0))
         # EXPECTED-REWARD MODE (training-only alignment with the MILP). See
         # configure_expected_reward(). When True, step() books award/activation
         # revenues in EXPECTATION instead of sampling the two Bernoulli draws.
@@ -352,6 +359,18 @@ class MultiBESSEnv(ParallelEnv):
         realized market outcomes. Returns self.
         """
         self.expected_reward_mode = bool(enable)
+        return self
+
+    def configure_availability_penalty(self, coeff: float = 1.0):
+        """Set the FIX 6 availability-penalty coefficient (training only).
+        In expected_reward_mode the capacity payment of each commitment is
+        scaled by the fraction of committed power the battery can actually
+        deliver at the delivery hour (over the service sustain window);
+        `coeff` multiplies the withheld part. 1.0 (default) withholds all
+        undeliverable capacity, 0.0 disables the fix. Evaluation envs sample
+        and are unaffected regardless. Returns self.
+        """
+        self.availability_penalty_coeff = float(coeff)
         return self
 
     def configure_full_foresight(self, enable: bool = True):
@@ -491,6 +510,10 @@ class MultiBESSEnv(ParallelEnv):
         # Track per-agent SOC change from activations (downward charges; upward discharges)
         # so we can apply it AFTER the arbitrage SOC update above.
         per_agent_dsoc_act = {a: 0.0 for a in self.agents}
+        # FIX 6: per-agent availability penalty (capacity remuneration withheld
+        # for committed power the battery cannot back at delivery). Nonzero only
+        # in expected_reward_mode (training); eval / MILP replay / BC keep it 0.
+        per_agent_avail_pen = {a: 0.0 for a in self.agents}
 
         # In directional mode, draw a single CATEGORICAL outcome per hour for
         # each service root (aFRR, mFRR) that determines whether Terna calls
@@ -639,6 +662,20 @@ class MultiBESSEnv(ParallelEnv):
             # bound violations structurally impossible (MILP/BC stayed in bounds
             # only because they bid sanely; overcommitting policies exposed the
             # missing within-hour clamp).
+            # FIX 6 reference sustain durations for the availability check. Same
+            # numbers the bid-time decode clip and the MILP headroom use
+            # (FCR 0.5 h symmetric, aFRR 1 h, mFRR 2 h), so a policy that keeps
+            # SoC where the MILP does scores avail_frac = 1 and loses nothing.
+            _avail_ref_h = {
+                ServiceType.FCR: 0.5,
+                ServiceType.AFRR: 1.0,
+                ServiceType.MFRR: 2.0,
+            }
+            if self.directional_services:
+                _avail_ref_h.update({
+                    ServiceType.AFRR_UP: 1.0, ServiceType.AFRR_DN: 1.0,
+                    ServiceType.MFRR_UP: 2.0, ServiceType.MFRR_DN: 2.0,
+                })
             for a in self.agents:
                 i = self.agent_name_mapping[a]
                 bp = self.multi_params.batteries[i]
@@ -650,8 +687,21 @@ class MultiBESSEnv(ParallelEnv):
                     s = services_by_type.get(st)
                     if s is None:
                         continue
-                    # Capacity payment booked at DELIVERY (Option 3): paid for
-                    # being available this hour, regardless of activation.
+                    direction = service_directions.get(st, 'sym')
+                    requested_mwh = c.mw  # MW * 1h
+                    energy_price = s.energy_price
+                    # Deliverable headroom given the PROJECTED SoC (already
+                    # reflects earlier activations in this same hour). Computed
+                    # BEFORE the capacity payment so the payment can be scaled by
+                    # what the battery can actually back this hour.
+                    if direction == 'up':
+                        deliverable = max(0.0, (soc_proj - self.soc_min) * eff * cap)
+                    elif direction == 'dn':
+                        deliverable = max(0.0, (self.soc_max - soc_proj) * cap / eff)
+                    else:  # FCR symmetric: limited by the tighter of the two rooms
+                        deliverable = max(0.0, min((soc_proj - self.soc_min),
+                                                   (self.soc_max - soc_proj)) * cap)
+
                     # FIX 5: commitment is registered at FULL reserved size, so
                     # value it by its award probability HERE (aw_w = award_prob
                     # in expected-reward training, 1.0 in eval where it exists
@@ -660,9 +710,33 @@ class MultiBESSEnv(ParallelEnv):
                         aw_w = float(s.award_probability)
                     else:
                         aw_w = 1.0
+                    # Capacity payment booked at DELIVERY (Option 3): paid for
+                    # being available this hour, regardless of activation.
                     cap_pay = s.capacity_price * c.mw * aw_w
                     per_agent_flex[a] += cap_pay
                     per_service_revenue[st] = per_service_revenue.get(st, 0.0) + cap_pay
+                    # FIX 6 (TRAINING ONLY): capacity remuneration requires being
+                    # able to DELIVER the committed power. Scale it by the
+                    # deliverable fraction over the service sustain window and
+                    # withhold the rest. Gated on expected_reward_mode so eval /
+                    # MILP replay / BC (which sample) stay byte-identical and the
+                    # reported baseline never moves. Net capacity contribution
+                    # stays in [0, cap_pay], so it cannot destabilise training.
+                    # This removes the capacity-farming incentive that let the
+                    # PPO stack bids while parking SoC at an extreme to dodge
+                    # cycling and degradation.
+                    if self.expected_reward_mode and c.mw > 1e-9:
+                        ref_h = _avail_ref_h.get(st, 1.0)
+                        required = c.mw * ref_h
+                        avail_frac = (float(np.clip(deliverable / required, 0.0, 1.0))
+                                      if required > 1e-9 else 0.0)
+                        avail_pen = (self.availability_penalty_coeff * cap_pay
+                                     * (1.0 - avail_frac))
+                        if avail_pen != 0.0:
+                            per_agent_flex[a] -= avail_pen
+                            per_service_revenue[st] = (
+                                per_service_revenue.get(st, 0.0) - avail_pen)
+                            per_agent_avail_pen[a] += avail_pen
                     # activation in the DELIVERY hour. EXPECTED-REWARD MODE:
                     # weight by activation_probability instead of drawing the
                     # Bernoulli; eval keeps sampling (bit-identical there).
@@ -672,18 +746,6 @@ class MultiBESSEnv(ParallelEnv):
                         act_w = 1.0 if (self._rng.random() < s.activation_probability) else 0.0
                     if act_w <= 0.0:
                         continue
-                    direction = service_directions.get(st, 'sym')
-                    requested_mwh = c.mw  # MW * 1h
-                    energy_price = s.energy_price
-                    # Deliverable given the PROJECTED SoC (already reflects
-                    # earlier activations in this same hour).
-                    if direction == 'up':
-                        deliverable = max(0.0, (soc_proj - self.soc_min) * eff * cap)
-                    elif direction == 'dn':
-                        deliverable = max(0.0, (self.soc_max - soc_proj) * cap / eff)
-                    else:  # FCR symmetric: limited by the tighter of the two rooms
-                        deliverable = max(0.0, min((soc_proj - self.soc_min),
-                                                   (self.soc_max - soc_proj)) * cap)
                     delivered = min(requested_mwh, deliverable)
                     undelivered = max(0.0, requested_mwh - delivered)
 
@@ -818,6 +880,7 @@ class MultiBESSEnv(ParallelEnv):
                 'arbitrage': per_agent_arb[a],
                 'flex_revenue': per_agent_flex[a],
                 'degradation': per_agent_deg[a],
+                'availability_penalty': float(per_agent_avail_pen[a]),
                 'throughput': per_agent_throughput[a] + flex_throughput_per_agent[a],
                 'soc': float(self._socs[self.agent_name_mapping[a]]),
                 'soh': float(self._lfp_states[self.agent_name_mapping[a]].soh),

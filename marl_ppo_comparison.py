@@ -65,6 +65,17 @@ def train_ppo_policy(
     fleet,
     n_iterations: int,
     bc_net: Optional[BCPolicyNet] = None,
+    # July 2026 fix: the REAL market window the PPO trains on. When None the
+    # training env silently fell back to a fixed synthetic sinusoid with
+    # award_probability=1.0, while MILP/BC used the real window -- the PPO was
+    # the only agent trained in a different world. Pass train_window here.
+    market_window=None,
+    # July 2026 fix: start each training episode from the SOC the previous one
+    # ended at, instead of resetting to soc_init=0.5. The MILP oracle, the BC
+    # roll-out and the evaluation all carry SOC across days; the PPO was the
+    # only agent given a fresh half-full battery every episode. Requires
+    # market_window (no effect on the synthetic fallback env).
+    carry_soc_across_episodes: bool = True,
     use_nonlinear_degradation: bool = False,
     episode_hours: int = 24,
     seed: int = 0,
@@ -115,6 +126,25 @@ def train_ppo_policy(
     # main process with no separate worker actor. Let RLlib handle Ray itself.
     register_multi_bess_env()
 
+    # ---- Wire the REAL market window into the training env ----
+    # One real day is sampled per episode; the window's own per-hour services
+    # carry the real award_probability / capacity_price / energy_price.
+    window_key = None
+    if market_window is not None:
+        from marl_trainer import register_market_window
+        window_key = register_market_window(
+            market_window, key=f"ppo_train_window_seed{seed}")
+        if verbose:
+            print(f"  [ppo] training market: REAL window "
+                  f"({int(market_window.n_days)} days), one day sampled per "
+                  f"episode")
+            print(f"  [ppo] SOC across episodes: "
+                  f"{'carried over' if carry_soc_across_episodes else 'reset to soc_init'}")
+    elif verbose:
+        print("  [ppo] WARNING: market_window=None -> training on the SYNTHETIC "
+              "sinusoid with award_probability=1.0. Results will NOT be "
+              "comparable to the MILP/BC baselines.")
+
     cfg = build_default_config(
         n_batteries=fleet.n_batteries,
         episode_hours=episode_hours,
@@ -130,6 +160,8 @@ def train_ppo_policy(
         full_foresight=full_foresight,
         overcommit_penalty=overcommit_penalty,
         expected_reward_training=expected_reward_training,
+        market_window_key=window_key,
+        carry_soc_across_episodes=carry_soc_across_episodes,
     )
 
     is_warm = bc_net is not None

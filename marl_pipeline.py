@@ -1161,6 +1161,7 @@ def run_full_pipeline(
         print(f"[pipeline] PPO vanilla: {ppo_iterations} iters on train window...")
         algo_v = train_ppo_policy(
             fleet, n_iterations=ppo_iterations, bc_net=None,
+            market_window=train_window,
             use_nonlinear_degradation=use_nonlinear_degradation, seed=ppo_seed,
             directional_services=directional_services,
             enable_commitments=enable_commitments,
@@ -1201,6 +1202,7 @@ def run_full_pipeline(
         print(f"[pipeline] PPO BC-warmstart: {ppo_iterations} iters on train window...")
         algo_w = train_ppo_policy(
             fleet, n_iterations=ppo_iterations, bc_net=bc_net, bc_kl_beta_start=1.0, bc_kl_anneal_iters=ppo_iterations,
+            market_window=train_window,
             use_nonlinear_degradation=use_nonlinear_degradation, seed=ppo_seed,
             directional_services=directional_services,
             enable_commitments=enable_commitments,

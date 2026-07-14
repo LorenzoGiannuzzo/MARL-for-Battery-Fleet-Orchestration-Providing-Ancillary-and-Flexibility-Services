@@ -71,6 +71,135 @@ warnings.simplefilter("ignore")
 ENV_NAME = "multi_bess_bsp"
 
 
+# ---------------------------------------------------------------------------
+# REAL MARKET WINDOW PLUMBING (July 2026 fix)
+# ---------------------------------------------------------------------------
+# BUG THIS FIXES: the PPO training env was built WITHOUT `prices=`/`services=`,
+# so MultiBESSEnv.reset() silently fell back to `_default_prices` (a single
+# fixed 80 + 40*sin(2*pi*(t-6)/24) sinusoid, identical every episode) and
+# `_default_services` (award_probability = 1.0 on FCR/aFRR/mFRR, every hour).
+# The MILP oracle and the BC policy were built on the REAL market window and
+# every policy was evaluated on the REAL test window, so the PPO was the only
+# agent trained in a different (and far more generous) world: guaranteed awards
+# and a price signal with zero variance. The pipeline log line
+# "iters on train window" was simply false.
+#
+# FIX: hand the real MarketWindow to the training env and sample ONE REAL DAY
+# from it at every reset. Because the window carries the real per-hour
+# FlexibilityService definitions, the real award_probability, capacity_price and
+# energy_price come along automatically -- no separate wiring needed.
+#
+# The window is kept in a module-level registry and referenced by KEY from
+# env_config, rather than embedded in env_config directly: RLlib deep-copies
+# env_config, and a 365-day window holds tens of thousands of
+# FlexibilityService objects. This requires in-process rollouts
+# (num_env_runners=0), which is already forced on this setup for Windows
+# stability. With remote workers the registry would live only in the driver;
+# `_env_creator` raises a clear error in that case rather than silently falling
+# back to the synthetic market again.
+
+_MARKET_WINDOW_REGISTRY: Dict[str, Any] = {}
+
+
+def register_market_window(window: Any, key: str = "ppo_train_window") -> str:
+    """Register a MarketWindow so `_env_creator` can look it up by key.
+
+    Returns the key, to be passed to `build_default_config(market_window_key=)`.
+    """
+    _MARKET_WINDOW_REGISTRY[key] = window
+    return key
+
+
+class _WindowSamplingMultiBESSEnv(MultiBESSEnv):
+    """MultiBESSEnv that draws one REAL market day at every reset, and (by
+    default) carries the fleet SOC across episodes.
+
+    -- Day sampling --
+    An episode is 24 h but the training window is a full year, so each reset
+    samples a day uniformly at random from the window and pins the env's
+    prices/services to that day's real data. Uniform sampling (rather than
+    walking the year in calendar order) is deliberate: with ~3 episodes per PPO
+    iteration, sequential days would mean the policy sees January for the first
+    iterations, February for the next, and so on. That makes the training data
+    distribution non-stationary and biases the final policy toward whatever
+    season it saw last. Uniform sampling keeps the batch distribution stable
+    while still covering the whole year.
+
+    The day sampler deliberately uses its OWN Generator: MultiBESSEnv.reset()
+    re-seeds `self._rng` from `_default_seed` on every episode, so a sampler
+    sharing `self._rng` would draw the SAME day forever and reintroduce exactly
+    the single-day bug this class exists to fix.
+
+    -- SOC carry-over (carry_soc_across_episodes=True) --
+    MultiBESSEnv.reset() puts every SOC back to `soc_init` (0.5). That is wrong
+    for this problem: a BSP does not wake up at 50% every morning. The MILP
+    oracle, the BC roll-out and the evaluation all carry SOC from one day to the
+    next (marl_pipeline sets `env._socs` after reset and rebuilds the
+    observations), so the PPO was the only agent handed a free, unrealistic
+    half-full battery every episode.
+
+    With carry-over enabled, each episode starts from the SOC the fleet actually
+    ended the previous episode with. The initial-SOC distribution then becomes
+    self-consistent with the policy's own behaviour instead of a fixed point
+    mass at 0.5, which is both more realistic and what the evaluation does.
+    Carrying SOC across a random day jump is sound: the policy conditions on
+    (prices, SOC), and the two are independent, so "any realistic SOC on any
+    day" is exactly the state distribution we want it to master.
+
+    NOT carried (deliberately):
+      * commitments -- cleared per episode by the base reset(), which matches
+        the evaluation exactly (marl_pipeline builds a fresh env per day).
+      * FCE / capacity loss -- the base reset() rebuilds the LFP states from
+        `fce_cumulative_initial`. Carrying them would age the fleet through
+        ~660 episodes of training (about 1.8 simulated years), far beyond the
+        one year the evaluation sees. With use_nonlinear_degradation=False the
+        degradation cost is linear in throughput and does not read FCE at all,
+        so the reward is unaffected either way; with the non-linear model,
+        carrying it would actively corrupt training.
+    """
+
+    def __init__(self, market_window: Any, day_seed: Optional[int] = None,
+                 carry_soc_across_episodes: bool = True, **kwargs):
+        # Set before super().__init__(): the base class reads several attrs via
+        # getattr() during construction, so this ordering matches the codebase.
+        self._market_window = market_window
+        self._day_rng = np.random.default_rng(day_seed)
+        self._sampled_day: Optional[int] = None
+        self._carry_soc = bool(carry_soc_across_episodes)
+        self._n_resets = 0
+        super().__init__(**kwargs)
+
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
+        # Capture the SOC the fleet ENDED the previous episode with, BEFORE
+        # super().reset() overwrites it with soc_init. Nothing else touches
+        # _socs between episodes, so at this point it still holds the final
+        # state of the last roll-out. Skipped on the very first reset, where
+        # soc_init is the legitimate cold start.
+        carried = None
+        if self._carry_soc and self._n_resets > 0:
+            carried = np.array(self._socs, dtype=np.float64, copy=True)
+
+        d = int(self._day_rng.integers(0, int(self._market_window.n_days)))
+        prices_day, services_day = self._market_window.slice_day(d)
+        self._fixed_prices = list(prices_day)
+        self._fixed_services = list(services_day)
+        self._sampled_day = d
+
+        obs, infos = super().reset(seed=seed, options=options)
+
+        if carried is not None:
+            self._socs = carried
+            # CRITICAL: super().reset() already built `obs` from soc_init, so
+            # they are stale now. Rebuild them from the carried SOC or the
+            # policy would act on a 0.5 that is not the real state. This is the
+            # same set-_socs-then-rebuild pattern marl_pipeline uses to roll the
+            # MILP/BC/eval across days.
+            obs = {a: self._build_observation(a) for a in self.agents}
+
+        self._n_resets += 1
+        return obs, infos
+
+
 def _env_creator(env_config: Dict[str, Any]):
     """Ray Tune-compatible env creator. Receives a config dict and returns
     a Ray-wrapped multi-agent env.
@@ -108,7 +237,21 @@ def _env_creator(env_config: Dict[str, Any]):
     else:
         raise ValueError(f"unknown fleet_kind: {fleet_kind}")
 
-    raw_env = MultiBESSEnv(
+    # ---- Market data: REAL window (sampled per episode) or synthetic fallback ----
+    window_key = env_config.get("market_window_key", None)
+    market_window = (_MARKET_WINDOW_REGISTRY.get(window_key)
+                     if window_key is not None else None)
+    if window_key is not None and market_window is None:
+        raise ValueError(
+            f"market_window_key={window_key!r} was requested but is not in the "
+            f"registry (known keys: {sorted(_MARKET_WINDOW_REGISTRY)}). This "
+            f"happens when RLlib builds the env in a REMOTE worker process: the "
+            f"registry lives in the driver. Keep num_env_runners=0 (the current "
+            f"setting) or call register_market_window() inside the worker. "
+            f"Refusing to fall back to the synthetic market silently."
+        )
+
+    env_kwargs = dict(
         multi_params=fleet,
         episode_hours=episode_hours,
         use_nonlinear_degradation=use_nl,
@@ -116,6 +259,27 @@ def _env_creator(env_config: Dict[str, Any]):
         seed=seed,
         directional_services=directional,
     )
+    if market_window is not None:
+        # Offset the day-sampler seed off the env seed so the day sequence is
+        # reproducible but not aligned with the env's own RNG stream.
+        carry_soc = bool(env_config.get("carry_soc_across_episodes", True))
+        raw_env = _WindowSamplingMultiBESSEnv(
+            market_window=market_window,
+            day_seed=(0 if seed is None else int(seed)) + 7919,
+            carry_soc_across_episodes=carry_soc,
+            **env_kwargs,
+        )
+        print(f"  [env] training market: REAL window, "
+              f"{int(market_window.n_days)} days, one real day sampled per "
+              f"episode (real award_probability from the window)")
+        print(f"  [env] SOC across episodes: "
+              f"{'CARRIED from previous episode (matches eval roll-out)' if carry_soc else f'RESET to soc_init={raw_env.soc_init} every episode'}")
+    else:
+        raw_env = MultiBESSEnv(**env_kwargs)
+        print("  [env] WARNING: no market_window_key in env_config -> the env "
+              "falls back to the SYNTHETIC default sinusoid (80+40*sin) with "
+              "award_probability=1.0 on every service. This is NOT the real "
+              "market and is NOT comparable to the MILP/BC baselines.")
     # Realistic commitment market model (Steps A-D). Off by default; switched
     # on by passing enable_commitments via env_config (build_default_config).
     if env_config.get("enable_commitments", False):
@@ -184,6 +348,8 @@ def build_default_config(
     full_foresight: bool = False,
     overcommit_penalty: float = 0.0,
     expected_reward_training: bool = False,
+    market_window_key: Optional[str] = None,
+    carry_soc_across_episodes: bool = True,
 ) -> PPOConfig:
     """Build a PPOConfig for shared-policy multi-agent training.
 
@@ -220,6 +386,12 @@ def build_default_config(
         full_foresight=full_foresight,
         overcommit_penalty=overcommit_penalty,
         expected_reward_training=expected_reward_training,
+        # Key into _MARKET_WINDOW_REGISTRY. None => synthetic fallback (loud).
+        market_window_key=market_window_key,
+        # Start each episode from the SOC the previous one ended at, instead of
+        # snapping back to soc_init=0.5. Matches the MILP/BC/eval roll-out.
+        # Only has an effect when a real market window is wired in.
+        carry_soc_across_episodes=carry_soc_across_episodes,
     )
 
     config = (
