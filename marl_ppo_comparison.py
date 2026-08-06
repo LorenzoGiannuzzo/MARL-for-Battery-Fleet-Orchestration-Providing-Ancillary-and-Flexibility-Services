@@ -79,10 +79,23 @@ def train_ppo_policy(
     use_nonlinear_degradation: bool = False,
     episode_hours: int = 24,
     seed: int = 0,
-    # washout-mitigation: applicati SOLO quando si parte da warm-start BC,
-    # perché l'actor è già buono ma il critic è random.
+    # ---------------- WARM-START FACTORS (ablation axes) -----------------
+    # These four used to move together whenever bc_net was not None, which
+    # is exactly the confound Reviewers 1 (pt 1), 2 (pt 6) and 3 (pt 1)
+    # raised: the reported warm-start gain could not be attributed to
+    # behavioural cloning because initialisation, learning rate, entropy
+    # bonus and the KL anchor all changed at once. Each is now independent:
+    #
+    #   factor 1  initialisation   bc_net is not None
+    #   factor 2  learning rate    warmstart_lr_scale  (1.0 = same as vanilla)
+    #   factor 3  entropy bonus    warmstart_entropy_coeff (None = keep base)
+    #   factor 4  KL anchoring     use_kl_anchor
+    #
+    # Defaults reproduce the pre-revision warm start exactly, so existing
+    # call sites are unaffected.
     warmstart_lr_scale: float = 0.1,
-    warmstart_entropy_coeff: float = 0.0,
+    warmstart_entropy_coeff: Optional[float] = 0.0,
+    use_kl_anchor: bool = True,
     # --- Fix B: ancoraggio KL verso la BC congelata (solo warm-start) ---
     bc_kl_beta_start: float = 1.0,
     bc_kl_anneal_iters: Optional[int] = None,
@@ -116,6 +129,7 @@ def train_ppo_policy(
     full_foresight: bool = False,
     overcommit_penalty: float = 0.0,
     expected_reward_training: bool = False,
+    sustain=None,
 ):
     """Allena una shared-policy PPO sul MultiBESSEnv e restituisce l'algo RLlib."""
     # NOTE on Ray init: we deliberately do NOT call ray.init() here. Earlier runs
@@ -162,36 +176,62 @@ def train_ppo_policy(
         expected_reward_training=expected_reward_training,
         market_window_key=window_key,
         carry_soc_across_episodes=carry_soc_across_episodes,
+        sustain_hours=sustain,
     )
 
     is_warm = bc_net is not None
+    # Which warm-start factors are actually active in THIS run. Logged so
+    # that every line of the ablation table can be traced back to a
+    # configuration without re-reading the call site.
+    active_factors = []
     if is_warm:
-        # 1) Mitigazioni soft: riduci lr e azzera l'entropy bonus per non
-        #    distruggere l'actor BC mentre il critic random produce vantaggi
-        #    rumorosi (critic washout).
+        active_factors.append("init(BC)")
+        # --- factor 2: learning rate ---------------------------------
+        # warmstart_lr_scale == 1.0 leaves the vanilla learning rate in
+        # place, which is what isolates initialisation from the LR change.
         try:
             base_lr = float(cfg.lr) if getattr(cfg, "lr", None) else 5e-5
         except (TypeError, ValueError):
             base_lr = 5e-5
-        cfg = cfg.training(lr=base_lr * warmstart_lr_scale,
-                           entropy_coeff=warmstart_entropy_coeff)
+        training_kwargs = {}
+        if abs(float(warmstart_lr_scale) - 1.0) > 1e-12:
+            training_kwargs["lr"] = base_lr * float(warmstart_lr_scale)
+            active_factors.append(f"lr x{warmstart_lr_scale:g}")
+        # --- factor 3: entropy bonus ---------------------------------
+        # None means "do not touch it", i.e. keep the vanilla entropy
+        # coefficient. 0.0 removes the bonus (the pre-revision behaviour).
+        if warmstart_entropy_coeff is not None:
+            training_kwargs["entropy_coeff"] = float(warmstart_entropy_coeff)
+            active_factors.append(f"entropy={warmstart_entropy_coeff:g}")
+        if training_kwargs:
+            cfg = cfg.training(**training_kwargs)
 
-        # 2) Fix B: ancoraggio KL verso la policy BC congelata. Complementare
-        #    al transfer: il transfer dà il punto di partenza, la KL impedisce
-        #    di abbandonarlo prima che il critic sia affidabile.
-        if bc_kl_anneal_iters is None:
-            bc_kl_anneal_iters = max(1, n_iterations // 2)
-        from marl_bc_kl_anchor import make_kl_anchored_config
-        cfg = make_kl_anchored_config(
-            cfg, bc_net,
-            policy_id=SHARED_POLICY_ID,
-            beta_start=bc_kl_beta_start,
-            anneal_iters=bc_kl_anneal_iters,
-            beta_floor=bc_kl_beta_floor,
-        )
-        if verbose:
-            print(f"  [ppo] Fix B KL anchor: beta_start={bc_kl_beta_start}, "
-                  f"anneal_iters={bc_kl_anneal_iters}, beta_floor={bc_kl_beta_floor}")
+        # --- factor 4: KL anchoring toward the frozen clone -----------
+        # Complementary to the transfer: the transfer supplies the starting
+        # point, the KL term stops the policy leaving it before the critic
+        # is reliable. Switchable so the anchor can be tested on its own.
+        if use_kl_anchor:
+            if bc_kl_anneal_iters is None:
+                bc_kl_anneal_iters = max(1, n_iterations // 2)
+            from marl_bc_kl_anchor import make_kl_anchored_config
+            cfg = make_kl_anchored_config(
+                cfg, bc_net,
+                policy_id=SHARED_POLICY_ID,
+                beta_start=bc_kl_beta_start,
+                anneal_iters=bc_kl_anneal_iters,
+                beta_floor=bc_kl_beta_floor,
+            )
+            active_factors.append(f"kl_anchor(beta0={bc_kl_beta_start:g},"
+                                  f"floor={bc_kl_beta_floor:g})")
+            if verbose:
+                print(f"  [ppo] KL anchor: beta_start={bc_kl_beta_start}, "
+                      f"anneal_iters={bc_kl_anneal_iters}, "
+                      f"beta_floor={bc_kl_beta_floor}")
+        elif verbose:
+            print("  [ppo] KL anchor: DISABLED (ablation)")
+    if verbose:
+        print(f"  [ppo] warm-start factors active: "
+              f"{', '.join(active_factors) if active_factors else 'none (vanilla)'}")
 
     algo = cfg.build_algo()  # RLlib 2.55: build_algo() (build() is deprecated)
 
@@ -241,6 +281,98 @@ def train_ppo_policy(
     except Exception:
         pass
     return algo
+
+
+def diagnose_zero_policy(algo, observations, directional_services: bool,
+                         bc_net=None, policy_id: str = SHARED_POLICY_ID,
+                         label: str = "policy") -> dict:
+    """Explain why a trained policy scored exactly zero at evaluation.
+
+    Evaluation uses the per-axis ARGMAX while training samples from the
+    distribution. Those can disagree completely: with 11 bins per axis and a
+    near-uniform distribution, the mode can sit on bin 0 (the no-op) while
+    the sampled behaviour still earns. So a profit of exactly 0.00 EUR admits
+    two very different readings, and they call for opposite fixes:
+
+      the policy is DESTROYED   -> protect the initialisation
+      the argmax is the no-op   -> evaluate as trained, or sharpen the policy
+
+    This reports the numbers that separate them:
+
+      argmax histogram      a single spike at bin 0 means the mode is the
+                            no-op on that axis
+      mean max probability  1/11 = 0.091 is uniform, so the argmax is
+                            essentially arbitrary; near 1.0 is a confident
+                            policy
+      entropy per axis      ln(11) = 2.398 is the uniform maximum
+      match vs the clone    verify_transfer runs BEFORE the updates; this
+                            runs AFTER, so it says how far the policy moved
+
+    Never raises: a diagnostic must not be able to break the run it is
+    diagnosing.
+    """
+    import numpy as _np
+    out = {}
+    try:
+        import torch
+        from marl_env import (N_ACTION_BINS, ACTION_AXES,
+                              ACTION_AXES_DIRECTIONAL)
+        n_axes = ACTION_AXES_DIRECTIONAL if directional_services else ACTION_AXES
+        module = algo.get_module(policy_id)
+
+        obs = _np.asarray(observations, dtype=_np.float32)
+        if obs.ndim == 1:
+            obs = obs.reshape(1, -1)
+        t_obs = torch.as_tensor(obs, dtype=torch.float32)
+        with torch.no_grad():
+            logits = module.forward_inference(
+                {"obs": t_obs})["action_dist_inputs"]
+        logits = logits.detach().cpu().numpy().reshape(
+            -1, n_axes, N_ACTION_BINS)
+
+        argmax = logits.argmax(axis=-1)
+        shifted = logits - logits.max(axis=-1, keepdims=True)
+        probs = _np.exp(shifted)
+        probs /= probs.sum(axis=-1, keepdims=True)
+        max_p = probs.max(axis=-1).mean(axis=0)
+        ent = (-(probs * _np.log(probs + 1e-12)).sum(axis=-1)).mean(axis=0)
+        frac_zero = (argmax == 0).mean(axis=0)
+
+        out["argmax_frac_bin0"] = [float(x) for x in frac_zero]
+        out["mean_max_prob"] = [float(x) for x in max_p]
+        out["entropy_per_axis"] = [float(x) for x in ent]
+
+        print(f"  [diag/{label}] n_obs={obs.shape[0]}, "
+              f"uniform reference: max_prob=0.091, entropy=2.398")
+        print(f"  [diag/{label}] fraction of observations whose argmax is "
+              f"bin 0, per axis:")
+        print(f"                 {[f'{x:.2f}' for x in frac_zero]}")
+        print(f"  [diag/{label}] mean max probability per axis:")
+        print(f"                 {[f'{x:.3f}' for x in max_p]}")
+        print(f"  [diag/{label}] entropy per axis:")
+        print(f"                 {[f'{x:.3f}' for x in ent]}")
+
+        if bc_net is not None:
+            with torch.no_grad():
+                bc_logits = bc_net(t_obs)
+            bc_a = bc_logits.detach().cpu().numpy().reshape(
+                -1, n_axes, N_ACTION_BINS).argmax(axis=-1)
+            per_axis = (argmax == bc_a).mean(axis=0)
+            overall = float((argmax == bc_a).mean())
+            out["bc_match_per_axis"] = [float(x) for x in per_axis]
+            out["bc_match_overall"] = overall
+            print(f"  [diag/{label}] agreement with the clone AFTER training: "
+                  f"{overall:.3f} overall")
+            print(f"                 per axis "
+                  f"{[f'{x:.2f}' for x in per_axis]}")
+            bc_zero = (bc_a == 0).mean(axis=0)
+            print(f"  [diag/{label}] for reference, the clone's own argmax is "
+                  f"bin 0 this often:")
+            print(f"                 {[f'{x:.2f}' for x in bc_zero]}")
+    except Exception as exc:
+        print(f"  [diag/{label}] diagnostic unavailable: "
+              f"{type(exc).__name__}: {exc}")
+    return out
 
 
 def make_rllib_policy_fn(algo, policy_id: str = SHARED_POLICY_ID,

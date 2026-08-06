@@ -41,6 +41,7 @@ from marl_milp_continuous import (MultiBatteryParameters,
                                    MultiBESSMILPOptimizer)
 from flexibility_market import FlexibilityService, ServiceType
 from marl_env import (MultiBESSEnv, N_ACTION_BINS, ACTION_AXES, OBS_DIM)
+from market_constants import DEFAULT_SUSTAIN
 
 warnings.simplefilter("ignore")
 
@@ -195,8 +196,8 @@ def _deprecated_generate_expert_demos(
         # Solve MILP for this scenario.
         # STRADA B: build the MILP in DIRECTIONAL (5-service) mode with
         # sustain hours aligned to the env (marl_env._decode_clip_actions):
-        #   FCR  4h  (Terna FCR Cooperation; env uses fcr_sustain=4.0)
-        #   aFRR 1h, mFRR 2h (env defaults).
+        #   windows taken from market_constants.DEFAULT_SUSTAIN, the same
+        #   object the env and the demo MILP use (SO GL Art. 156(10)).
         # Previously this constructed the MILP with directional_services=False
         # (3 aggregate services) and the default fcr_sustain_hours=0.25, so the
         # expert planned in a more permissive world than the env it is later
@@ -208,9 +209,7 @@ def _deprecated_generate_expert_demos(
             use_nonlinear_degradation=use_nonlinear_degradation,
             fce_cumulative_initial=fce_cumulative_initial,
             directional_services=True,
-            fcr_sustain_hours=4.0,
-            afrr_sustain_hours=1.0,
-            mfrr_sustain_hours=2.0,
+            **DEFAULT_SUSTAIN.as_milp_kwargs(),
         )
         result = opt.optimize(episode_hours, prices, services)
         if result.solver_status != "Optimal":

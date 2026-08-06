@@ -200,6 +200,29 @@ class _WindowSamplingMultiBESSEnv(MultiBESSEnv):
         return obs, infos
 
 
+def _resolve_sustain(env_config: Dict[str, Any]):
+    """Pull the SustainDurations out of env_config.
+
+    Accepts a SustainDurations instance or a plain dict
+    {'fcr':..,'afrr':..,'mfrr':..}. The dict form matters because RLlib
+    serialises env_config on its way to a worker, and a plain dict
+    survives that round trip more predictably than a frozen dataclass.
+    """
+    from market_constants import SustainDurations, DEFAULT_SUSTAIN
+    raw = env_config.get("sustain_hours", None)
+    if raw is None:
+        return DEFAULT_SUSTAIN
+    if isinstance(raw, SustainDurations):
+        return raw
+    if isinstance(raw, dict):
+        return SustainDurations(
+            fcr=float(raw["fcr"]), afrr=float(raw["afrr"]),
+            mfrr=float(raw["mfrr"]),
+            label=str(raw.get("label", "from_env_config")))
+    raise TypeError("sustain_hours must be SustainDurations or dict, "
+                    f"got {type(raw).__name__}")
+
+
 def _env_creator(env_config: Dict[str, Any]):
     """Ray Tune-compatible env creator. Receives a config dict and returns
     a Ray-wrapped multi-agent env.
@@ -258,6 +281,7 @@ def _env_creator(env_config: Dict[str, Any]):
         fce_cumulative_initial=fce_init,
         seed=seed,
         directional_services=directional,
+        sustain_hours=_resolve_sustain(env_config),
     )
     if market_window is not None:
         # Offset the day-sampler seed off the env seed so the day sequence is
@@ -348,6 +372,10 @@ def build_default_config(
     full_foresight: bool = False,
     overcommit_penalty: float = 0.0,
     expected_reward_training: bool = False,
+    # Reserve sustain windows shared with the MILP and the evaluation env.
+    # None -> market_constants.DEFAULT_SUSTAIN. Serialised as a plain dict
+    # into env_config so it survives RLlib's trip to a worker process.
+    sustain_hours=None,
     market_window_key: Optional[str] = None,
     carry_soc_across_episodes: bool = True,
 ) -> PPOConfig:
@@ -386,6 +414,14 @@ def build_default_config(
         full_foresight=full_foresight,
         overcommit_penalty=overcommit_penalty,
         expected_reward_training=expected_reward_training,
+        # Reserve sustain windows (market_constants.SustainDurations),
+        # flattened to a dict for worker serialisation. _resolve_sustain()
+        # rebuilds the dataclass inside the env creator.
+        sustain_hours=(
+            None if sustain_hours is None
+            else (sustain_hours if isinstance(sustain_hours, dict)
+                  else {**sustain_hours.as_dict(),
+                        "label": sustain_hours.label})),
         # Key into _MARKET_WINDOW_REGISTRY. None => synthetic fallback (loud).
         market_window_key=market_window_key,
         # Start each episode from the SOC the previous one ended at, instead of

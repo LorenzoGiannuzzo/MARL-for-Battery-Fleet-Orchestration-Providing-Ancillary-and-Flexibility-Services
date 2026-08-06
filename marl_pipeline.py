@@ -52,6 +52,7 @@ from marl_bc import (BCPolicyNet, train_bc,
 from italian_market_data import (MarketWindow, make_synthetic_market_window,
                                    PUN2024Calibration, ServiceCalibration)
 from degradation_model import LFPBatteryState
+from market_constants import SustainDurations, DEFAULT_SUSTAIN
 
 warnings.simplefilter("ignore")
 
@@ -103,6 +104,7 @@ def generate_multi_day_expert_demos(
     full_foresight: bool = False,
     overcommit_penalty: float = 0.0,
     milp_mode: str = "continuous",
+    sustain: SustainDurations = DEFAULT_SUSTAIN,
 ) -> MultiDayDemoResult:
     """Day-by-day MILP demo generation with rolling per-BESS state.
 
@@ -212,15 +214,13 @@ def generate_multi_day_expert_demos(
             soc_clamped.append(float(np.clip(soc[i], lo, hi)))
 
         # Build the day's MILP with current rolling state.
-        # STRADA B: pass sustain hours explicitly so the MILP plans in the SAME
-        # world the env evaluates in. The env (marl_env._decode_clip_actions)
-        # uses fcr_sustain=4.0, afrr_sustain=1.0, mfrr_sustain=2.0. The MILP
-        # constructor defaults fcr_sustain_hours to 0.25, so without this the
-        # MILP planned FCR for 15 min while the env required 4 h, letting the
-        # MILP over-reserve FCR/flex in planning; the env then clipped those
-        # reservations on roll-out. This is the single remaining MILP<->env
-        # mismatch (aFRR/mFRR sustain and directional mode already matched) and
-        # is the main driver of the continuous->discrete profit collapse.
+        # Pass sustain hours explicitly so the MILP plans in the SAME world the
+        # env evaluates in. Both now read the SAME SustainDurations object
+        # (market_constants), replacing the previous arrangement where the MILP
+        # was overridden to 4.0 h here to chase a hard-coded 4.0 h in the env
+        # clip, while the MILP's own default was 0.25 h and the env's
+        # availability check used 0.5 h. See market_constants for the SO GL
+        # Art. 156(10) basis of the 15-minute default.
         #
         # milp_mode selects the baseline:
         #   "continuous" -> MultiBESSMILPOptimizer: continuous power, the
@@ -239,9 +239,7 @@ def generate_multi_day_expert_demos(
                 nonlinear_replacement_cost=nonlinear_replacement_cost,
                 fce_cumulative_initial=fce,
                 directional_services=directional_services,
-                fcr_sustain_hours=4.0,
-                afrr_sustain_hours=1.0,
-                mfrr_sustain_hours=2.0,
+                **sustain.as_milp_kwargs(),
                 enable_commitments=enable_commitments,
                 penalty_k=penalty_k,
                 n_action_bins=N_ACTION_BINS,
@@ -254,9 +252,7 @@ def generate_multi_day_expert_demos(
                 nonlinear_replacement_cost=nonlinear_replacement_cost,
                 fce_cumulative_initial=fce,
                 directional_services=directional_services,
-                fcr_sustain_hours=4.0,
-                afrr_sustain_hours=1.0,
-                mfrr_sustain_hours=2.0,
+                **sustain.as_milp_kwargs(),
                 enable_commitments=enable_commitments,
                 penalty_k=penalty_k,
             )
@@ -296,6 +292,7 @@ def generate_multi_day_expert_demos(
                 soc_init=0.5,
                 seed=env_seed + day,
                 directional_services=directional_services,
+                sustain_hours=sustain,
             )
             if enable_commitments:
                 env.configure_commitments(True, commitment_lead_time, penalty_k)
@@ -371,6 +368,7 @@ def generate_multi_day_expert_demos(
             soc_init=0.5,
             seed=env_seed + day,
             directional_services=directional_services,
+            sustain_hours=sustain,
         )
         if enable_commitments:
             env.configure_commitments(True, commitment_lead_time, penalty_k)
@@ -581,6 +579,7 @@ def evaluate_policy_multi_day(
     penalty_k: float = 1.5,
     full_foresight: bool = False,
     overcommit_penalty: float = 0.0,
+    sustain: SustainDurations = DEFAULT_SUSTAIN,
 ) -> MultiDayEvalResult:
     """Evaluate a policy across multiple days with rolling state.
 
@@ -665,6 +664,7 @@ def evaluate_policy_multi_day(
             soc_init=0.5,
             seed=env_seed + day,
             directional_services=directional_services,
+            sustain_hours=sustain,
         )
         if enable_commitments:
             env.configure_commitments(True, commitment_lead_time, penalty_k)
@@ -901,6 +901,13 @@ class FullPipelineResult:
     test_milp_objective_eur: Optional[float] = None     # continuous MILP optimum
     test_ppo_vanilla_profit_eur: Optional[float] = None
     test_ppo_bc_warmstart_profit_eur: Optional[float] = None
+    # Same policies evaluated by SAMPLING from the action distribution
+    # instead of taking the per-axis argmax. The two can differ enormously
+    # for a high-entropy policy: the mode can be the no-op while the mass
+    # elsewhere is what earns. Reporting only one of them makes the number
+    # an artefact of an undeclared protocol choice.
+    test_ppo_vanilla_profit_stochastic_eur: Optional[float] = None
+    test_ppo_bc_warmstart_profit_stochastic_eur: Optional[float] = None
     test_ppo_vanilla_daily_profits: Optional[List[float]] = None
     test_ppo_bc_warmstart_daily_profits: Optional[List[float]] = None
 
@@ -944,6 +951,10 @@ def run_full_pipeline(
     eval_seed: int = 100,
     real_pun_xlsx_path: Optional[str] = None,
     real_msd_xlsx_paths: Optional[List[str]] = None,
+    # "NORD" for a northern-zone fleet (matches the EsitiMSD_*_Nord
+    # series); "PUN" reproduces the pre-revision behaviour. See
+    # italian_market_data.load_pun_from_gme_xlsx.
+    price_column: str = "PUN",
     run_ppo_vanilla: bool = False,
     run_ppo_bc_warmstart: bool = False,
     ppo_iterations: int = 200,
@@ -956,6 +967,15 @@ def run_full_pipeline(
     overcommit_penalty: float = 0.0,
     expected_reward_training: bool = False,
     milp_mode: str = "continuous",
+    # --- revision hooks ---------------------------------------------
+    # sustain: the SustainDurations scenario shared by env, MILP and BC.
+    # The three warm-start factors below used to be bundled together, which
+    # is the confound Reviewers 1/2/3 all flagged; marl_ablation.py varies
+    # them one at a time.
+    sustain: SustainDurations = DEFAULT_SUSTAIN,
+    use_kl_anchor: bool = True,
+    warmstart_lr_scale: float = 0.1,
+    warmstart_entropy_coeff: Optional[float] = 0.0,
 ) -> FullPipelineResult:
     """End-to-end pipeline: data -> MILP demos -> BC training -> evaluation.
 
@@ -996,6 +1016,11 @@ def run_full_pipeline(
         ppo_seed = eval_seed
         set_global_seeds(data_seed)
 
+    print(f"[pipeline] sustain windows: {sustain.describe()}")
+    if not sustain.is_sogl_compliant():
+        print("  [pipeline] WARNING: tau_FCR is outside the SO GL Art. 156(10) "
+              "range [15, 30] min; valid only as a sensitivity point.")
+
     test_start = train_start + timedelta(days=train_days)
     test_end = test_start + timedelta(days=test_days)
 
@@ -1006,6 +1031,7 @@ def run_full_pipeline(
         train_window = make_market_window_from_real_pun(
             start_date=train_start, end_date=test_start,
             pun_xlsx_path=real_pun_xlsx_path,
+            price_column=price_column,
             service_calibration=service_calibration,
             msd_xlsx_paths=real_msd_xlsx_paths,
             directional_services=directional_services,
@@ -1013,12 +1039,19 @@ def run_full_pipeline(
         test_window = make_market_window_from_real_pun(
             start_date=test_start, end_date=test_end,
             pun_xlsx_path=real_pun_xlsx_path,
+            price_column=price_column,
             service_calibration=service_calibration,
             msd_xlsx_paths=real_msd_xlsx_paths,
             directional_services=directional_services,
         )
         msd_note = "+MSD" if real_msd_xlsx_paths else "no MSD"
-        print(f"  using REAL PUN from {real_pun_xlsx_path} ({msd_note})")
+        print(f"  day-ahead series: {price_column} "
+              f"from {real_pun_xlsx_path} ({msd_note})")
+        if str(price_column).upper() == "PUN" and real_msd_xlsx_paths:
+            print("  [pipeline] NOTE: the day-ahead leg uses the national "
+                  "PUN while the reserve leg uses northern-zone MSD data. "
+                  "Storage settles zonally; pass price_column='NORD' for "
+                  "a consistent northern-zone study.")
         print(f"  train prices: mean {train_window.prices_hourly.mean():.2f} EUR/MWh, "
               f"std {train_window.prices_hourly.std():.2f}")
         print(f"  test prices:  mean {test_window.prices_hourly.mean():.2f} EUR/MWh, "
@@ -1051,6 +1084,7 @@ def run_full_pipeline(
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
             milp_mode=milp_mode,
+            sustain=sustain,
     )
     print(f"  demos: {train_demo.obs.shape[0]} samples, "
           f"total train MILP profit: {train_demo.total_milp_profit:.2f} EUR, "
@@ -1107,6 +1141,7 @@ def run_full_pipeline(
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
             milp_mode=milp_mode,
+            sustain=sustain,
     )
 
     # BC policy on the test window
@@ -1154,9 +1189,12 @@ def run_full_pipeline(
     # the test window with the SAME evaluate_policy_multi_day used for BC and
     # random, so all four numbers are apples-to-apples (env-realised).
     ppo_results: Dict[str, Any] = {}
+    ppo_stochastic: Dict[str, float] = {}
     ppo_training_metrics: Dict[str, list] = {}
     if run_ppo_vanilla or run_ppo_bc_warmstart:
-        from marl_ppo_comparison import train_ppo_policy, make_rllib_policy_fn
+        from marl_ppo_comparison import (train_ppo_policy,
+                                         make_rllib_policy_fn,
+                                         diagnose_zero_policy)
     if run_ppo_vanilla:
         print(f"[pipeline] PPO vanilla: {ppo_iterations} iters on train window...")
         algo_v = train_ppo_policy(
@@ -1170,6 +1208,7 @@ def run_full_pipeline(
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
             expected_reward_training=expected_reward_training,
+            sustain=sustain,
         )
         ppo_training_metrics["ppo_vanilla"] = [
             float(m.get("episode_reward_mean", 0.0) or 0.0)
@@ -1192,6 +1231,7 @@ def run_full_pipeline(
             penalty_k=penalty_k,
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
+            sustain=sustain,
         )
         ppo_results["ppo_vanilla"] = ppo_v_eval
         try:
@@ -1201,7 +1241,15 @@ def run_full_pipeline(
     if run_ppo_bc_warmstart:
         print(f"[pipeline] PPO BC-warmstart: {ppo_iterations} iters on train window...")
         algo_w = train_ppo_policy(
-            fleet, n_iterations=ppo_iterations, bc_net=bc_net, bc_kl_beta_start=1.0, bc_kl_anneal_iters=ppo_iterations,
+            fleet, n_iterations=ppo_iterations, bc_net=bc_net,
+            bc_kl_beta_start=1.0, bc_kl_anneal_iters=ppo_iterations,
+            # ABLATION HOOKS (Reviewer 1 pt 1, Reviewer 2 pt 6, Reviewer 3
+            # pt 1): the warm start changed four things at once. These three
+            # are now independently switchable so marl_ablation.py can vary
+            # exactly one factor at a time.
+            use_kl_anchor=use_kl_anchor,
+            warmstart_lr_scale=warmstart_lr_scale,
+            warmstart_entropy_coeff=warmstart_entropy_coeff,
             market_window=train_window,
             use_nonlinear_degradation=use_nonlinear_degradation, seed=ppo_seed,
             directional_services=directional_services,
@@ -1211,6 +1259,7 @@ def run_full_pipeline(
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
             expected_reward_training=expected_reward_training,
+            sustain=sustain,
         )
         ppo_training_metrics["ppo_bc"] = [
             float(m.get("episode_reward_mean", 0.0) or 0.0)
@@ -1233,7 +1282,53 @@ def run_full_pipeline(
             penalty_k=penalty_k,
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
+            sustain=sustain,
         )
+        # Evaluate the SAME policy both ways, always. Evaluation takes the
+        # per-axis argmax while training samples from the distribution, and
+        # for a policy that has not yet concentrated its mass those two give
+        # completely different answers: measured on the smoke run, argmax
+        # scored 0.00 EUR and sampling scored 1,374.89 EUR for one and the
+        # same set of weights. Which one is "the" result is a protocol choice
+        # that has to be stated and defended, not left implicit, so both go
+        # into the record and the paper can report the pair.
+        print("[eval] same policy, stochastic (sampled) evaluation...")
+        try:
+            _stoch = evaluate_policy_multi_day(
+                fleet, test_window,
+                policy_fn=make_rllib_policy_fn(
+                    algo_w, directional_services=directional_services,
+                    deterministic=False),
+                progress_label="PPO BC-warm (stochastic)",
+                use_nonlinear_degradation=use_nonlinear_degradation,
+                initial_soc=test_initial_soc,
+                initial_fce_cumulative=test_initial_fce,
+                initial_capacity_lost=test_initial_cap_lost,
+                env_seed=eval_seed + 1000,
+                record_trajectory=False,
+                directional_services=directional_services,
+                enable_commitments=enable_commitments,
+                commitment_lead_time=commitment_lead_time,
+                penalty_k=penalty_k,
+                full_foresight=full_foresight,
+                overcommit_penalty=overcommit_penalty,
+                sustain=sustain,
+            )
+            ppo_stochastic["ppo_bc"] = float(_stoch.total_profit_eur)
+            print(f"[eval] ppo_bc  argmax {ppo_w_eval.total_profit_eur:,.2f} EUR"
+                  f"  |  sampled {_stoch.total_profit_eur:,.2f} EUR")
+        except Exception as _exc:
+            print(f"[eval] stochastic evaluation failed: {_exc}")
+
+        # Action statistics explain a large gap between the two.
+        try:
+            _traj = (ppo_w_eval.trajectory or {}).get("observations")
+            if _traj is not None and len(_traj):
+                diagnose_zero_policy(algo_w, _traj, directional_services,
+                                     bc_net=bc_net, label="ppo_bc")
+        except Exception as _exc:
+            print(f"[eval] action statistics unavailable: {_exc}")
+
         ppo_results["ppo_bc"] = ppo_w_eval
         try:
             algo_w.stop()
@@ -1333,6 +1428,8 @@ def run_full_pipeline(
             ppo_results["ppo_vanilla"].total_profit_eur
             if "ppo_vanilla" in ppo_results else None
         ),
+        test_ppo_vanilla_profit_stochastic_eur=ppo_stochastic.get("ppo_vanilla"),
+        test_ppo_bc_warmstart_profit_stochastic_eur=ppo_stochastic.get("ppo_bc"),
         test_ppo_bc_warmstart_profit_eur=(
             ppo_results["ppo_bc"].total_profit_eur
             if "ppo_bc" in ppo_results else None

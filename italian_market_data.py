@@ -201,8 +201,31 @@ def load_pun_from_gme_xlsx(
     sheet_name: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    price_column: str = "PUN",
 ) -> Tuple[np.ndarray, List[datetime]]:
-    """Load hourly PUN prices from the official GME .xlsx download format.
+    """Load hourly day-ahead prices from the official GME .xlsx download.
+
+    ZONAL vs PUN (Reviewer 2, point 3-ii)
+    -------------------------------------
+    The PUN is the national single price paid by CONSUMERS. Generation and
+    storage settle at the ZONAL price of the bidding zone they sit in. The
+    paper states that MSD data is taken for the northern zone, so the
+    day-ahead leg has to be the NORD zonal series, not the PUN, or the two
+    revenue streams are drawn from two different price references.
+
+    `price_column` selects which series to read:
+
+        "PUN"   the national single price (legacy behaviour). Correct for a
+                consumer-side study, wrong for a storage operator.
+        "NORD"  northern-zone price. This is the one a BESS in the north
+                actually settles at, and the one to use here.
+        "CNOR", "CSUD", "SUD", "CALA", "SICI", "SARD" other zones.
+
+    The GME "MGPPrezzi" workbook carries one column per zone plus PUN, so a
+    zonal run needs that file rather than the "MGP-PUNPUN" export, which
+    only carries the national price. When the requested column is absent the
+    function raises rather than silently falling back, because a silent
+    fallback to PUN is exactly the failure this parameter exists to prevent.
 
     The GME download is a single-sheet Excel file (the active sheet is
     typically named 'MGP-PUNPUN' or 'MGP-Prezzi-PUN') with three columns:
@@ -258,13 +281,31 @@ def load_pun_from_gme_xlsx(
     import collections as _collections
     rows_by_date = _collections.OrderedDict()
     seen_header = False
+    # Column index of the requested price series, resolved from the header
+    # row. The single-price "MGP-PUNPUN" export has the price in column 2;
+    # the multi-zone "MGPPrezzi" export has one column per bidding zone, so
+    # the index has to be looked up by name.
+    price_idx = 2
+    want = str(price_column).strip().upper()
     for row in ws.iter_rows(values_only=True):
         if row is None or row[0] is None:
             continue
         if not seen_header:
             seen_header = True
+            header = [str(c).strip().upper() if c is not None else ""
+                      for c in row]
+            matches = [i for i, h in enumerate(header) if h == want]
+            if matches:
+                price_idx = matches[0]
+            elif want not in ("PUN", "\u20ac/MWH", "EUR/MWH"):
+                raise ValueError(
+                    f"price_column={price_column!r} not found in {xlsx_path}. "
+                    f"Header columns: {header}. The single-price "
+                    f"'MGP-PUNPUN' export does not contain zonal columns; "
+                    f"use the multi-zone 'MGPPrezzi' workbook for zonal "
+                    f"prices.")
             continue
-        data_str, ora, price = row[0], row[1], row[2]
+        data_str, ora, price = row[0], row[1], row[price_idx]
         if isinstance(data_str, datetime):
             day = data_str.date()
         else:
@@ -317,6 +358,7 @@ def load_pun_from_gme_xlsx_multi(
     sheet_name: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    price_column: str = "PUN",
 ) -> Tuple[np.ndarray, List[datetime]]:
     """Load and concatenate hourly PUN prices from one or more GME .xlsx files.
 
@@ -337,7 +379,8 @@ def load_pun_from_gme_xlsx_multi(
     all_prices: List[float] = []
     all_stamps: List[datetime] = []
     for p in xlsx_paths:
-        prices_i, stamps_i = load_pun_from_gme_xlsx(p, sheet_name=sheet_name)
+        prices_i, stamps_i = load_pun_from_gme_xlsx(
+            p, sheet_name=sheet_name, price_column=price_column)
         all_prices.extend(prices_i.tolist())
         all_stamps.extend(stamps_i)
 
@@ -366,6 +409,11 @@ def make_market_window_from_real_pun(
     start_date: datetime,
     end_date: datetime,
     pun_xlsx_path,  # str or List[str]
+    # Day-ahead price series. "PUN" is the national consumer reference
+    # price; a storage operator settles at the ZONAL price, so a study of
+    # a northern-zone fleet whose MSD data is EsitiMSD_*_Nord must set
+    # this to "NORD" (Reviewer 2, point 3-ii).
+    price_column: str = "PUN",
     service_calibration: Optional[ServiceCalibration] = None,
     msd_xlsx_paths: Optional[List[str]] = None,
     msd_use_empirical_award_rates: bool = True,
@@ -405,6 +453,7 @@ def make_market_window_from_real_pun(
     """
     prices, stamps = load_pun_from_gme_xlsx_multi(
         pun_xlsx_path, start_date=start_date, end_date=end_date,
+        price_column=price_column,
     )
     expected_hours = int((end_date - start_date).total_seconds() // 3600)
     if len(prices) != expected_hours:

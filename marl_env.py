@@ -61,6 +61,7 @@ from milp_optimizer import BatteryParameters
 from marl_milp_continuous import MultiBatteryParameters
 from flexibility_market import FlexibilityService, ServiceType
 from degradation_model import LFPBatteryState, LFPDegradationParameters
+from market_constants import SustainDurations, DEFAULT_SUSTAIN
 
 
 # ============================================================================
@@ -78,6 +79,9 @@ N_ACTION_BINS = 11
 ACTION_AXES = 5
 ACTION_AXES_DIRECTIONAL = 7  # [charge, discharge, FCR, aFRR_up, aFRR_dn, mFRR_up, mFRR_dn]
 _BIN_VALUES = np.linspace(0.0, 1.0, N_ACTION_BINS)  # [0.0, 0.1, ..., 1.0]
+
+# One-time per-process announce flag for the FIX A log line.
+_JOINT_SUSTAIN_ANNOUNCED = False
 
 
 def _decode_action_to_fractions(action: np.ndarray) -> np.ndarray:
@@ -201,6 +205,7 @@ class MultiBESSEnv(ParallelEnv):
         seed: Optional[int] = None,
         directional_services: bool = False,
         capacity_lost_initial: Optional[List[float]] = None,
+        sustain_hours: Optional[SustainDurations] = None,
     ):
         super().__init__()
         self.multi_params = multi_params
@@ -215,6 +220,14 @@ class MultiBESSEnv(ParallelEnv):
         self.soc_min = float(soc_min)
         self.soc_max = float(soc_max)
         self.directional_services = bool(directional_services)
+        # Reserve sustain windows (MILP Eq. 4-5 parity). Single source of
+        # truth: market_constants.SustainDurations. Before this was
+        # introduced the env used tau_FCR=4.0 h in the bid clip and 0.5 h
+        # in the FIX 6 availability check while the MILP defaulted to
+        # 0.25 h, so the three stages of one run disagreed. Now every
+        # consumer reads self.sustain.
+        self.sustain: SustainDurations = (
+            sustain_hours if sustain_hours is not None else DEFAULT_SUSTAIN)
         # Number of action axes depends on directional mode:
         #  legacy 5-axis: [charge, discharge, FCR, aFRR, mFRR]
         #  directional 7-axis: [charge, discharge, FCR, aFRR_up, aFRR_dn, mFRR_up, mFRR_dn]
@@ -303,6 +316,25 @@ class MultiBESSEnv(ParallelEnv):
         # the fix. Eval / MILP replay / BC sample, so they are unaffected.
         self.availability_penalty_coeff: float = float(
             getattr(self, "availability_penalty_coeff", 1.0))
+        # FIX A: JOINT sustain-budget enforcement at action decode (mirrors
+        # MILP Eq. 4-5). The per-service sustain caps in _decode_clip_actions
+        # each check the FULL SoC headroom independently, so stacking
+        # FCR + aFRR + mFRR can jointly commit up to ~3x the deliverable
+        # energy while every axis passes its own check; the capacity payment
+        # is then earned on energy that cannot exist (capacity farming).
+        # When True (default), the SUM of committed energy per direction is
+        # additionally capped by the same SoC budget the MILP uses, in BOTH
+        # training and evaluation (the decode is shared), closing the exploit
+        # at the source. MILP-feasible bids always pass (budgets are chosen
+        # >= the MILP's own limits), so MILP replay and BC are no-ops.
+        self.enforce_joint_sustain: bool = bool(
+            getattr(self, "enforce_joint_sustain", True))
+        global _JOINT_SUSTAIN_ANNOUNCED
+        if not _JOINT_SUSTAIN_ANNOUNCED:
+            print(f"  [env] FIX A joint sustain budget: "
+                  f"{'ENFORCED' if self.enforce_joint_sustain else 'OFF'} "
+                  f"(MILP Eq. 4-5 parity, train+eval)", flush=True)
+            _JOINT_SUSTAIN_ANNOUNCED = True
         # EXPECTED-REWARD MODE (training-only alignment with the MILP). See
         # configure_expected_reward(). When True, step() books award/activation
         # revenues in EXPECTATION instead of sampling the two Bernoulli draws.
@@ -371,6 +403,34 @@ class MultiBESSEnv(ParallelEnv):
         and are unaffected regardless. Returns self.
         """
         self.availability_penalty_coeff = float(coeff)
+        return self
+
+    def configure_joint_sustain(self, enable: bool = True):
+        """Enable/disable the JOINT sustain-budget enforcement (FIX A).
+        Default ON. Applies at action decode in BOTH training and evaluation,
+        capping the summed committed energy per direction to the SoC budget
+        (MILP Eq. 4-5 parity). Disable only to reproduce legacy runs where
+        the per-service caps alone allowed joint over-commitment. Returns
+        self.
+        """
+        self.enforce_joint_sustain = bool(enable)
+        return self
+
+    def configure_sustain_hours(self, sustain_hours: SustainDurations):
+        """Set the reserve sustain windows used by the bid clip, the joint
+        sustain budget (FIX A) and the FIX 6 availability check.
+
+        Must be the SAME object handed to the MILP (via
+        `sustain_hours.as_milp_kwargs()`), otherwise the optimizer plans
+        against constraints the environment does not enforce and the
+        comparison is no longer matched. Call after construction and
+        before reset. Returns self.
+        """
+        if not isinstance(sustain_hours, SustainDurations):
+            raise TypeError(
+                "sustain_hours must be a market_constants.SustainDurations, "
+                f"got {type(sustain_hours).__name__}")
+        self.sustain = sustain_hours
         return self
 
     def configure_full_foresight(self, enable: bool = True):
@@ -662,19 +722,22 @@ class MultiBESSEnv(ParallelEnv):
             # bound violations structurally impossible (MILP/BC stayed in bounds
             # only because they bid sanely; overcommitting policies exposed the
             # missing within-hour clamp).
-            # FIX 6 reference sustain durations for the availability check. Same
-            # numbers the bid-time decode clip and the MILP headroom use
-            # (FCR 0.5 h symmetric, aFRR 1 h, mFRR 2 h), so a policy that keeps
-            # SoC where the MILP does scores avail_frac = 1 and loses nothing.
+            # FIX 6 reference sustain durations for the availability check.
+            # These MUST be the same windows the bid-time decode clip and the
+            # MILP headroom use, or a policy that keeps SoC exactly where the
+            # MILP does would still be charged an availability penalty. They
+            # previously did not match (0.5 h here vs 4.0 h in the clip vs
+            # 0.25 h in the MILP default); all three now read self.sustain.
+            _tau = self.sustain
             _avail_ref_h = {
-                ServiceType.FCR: 0.5,
-                ServiceType.AFRR: 1.0,
-                ServiceType.MFRR: 2.0,
+                ServiceType.FCR: _tau.fcr,
+                ServiceType.AFRR: _tau.afrr,
+                ServiceType.MFRR: _tau.mfrr,
             }
             if self.directional_services:
                 _avail_ref_h.update({
-                    ServiceType.AFRR_UP: 1.0, ServiceType.AFRR_DN: 1.0,
-                    ServiceType.MFRR_UP: 2.0, ServiceType.MFRR_DN: 2.0,
+                    ServiceType.AFRR_UP: _tau.afrr, ServiceType.AFRR_DN: _tau.afrr,
+                    ServiceType.MFRR_UP: _tau.mfrr, ServiceType.MFRR_DN: _tau.mfrr,
                 })
             for a in self.agents:
                 i = self.agent_name_mapping[a]
@@ -955,8 +1018,13 @@ class MultiBESSEnv(ParallelEnv):
         over-committing costly: locked power is not free to reuse.
         """
         out = {}
-        afrr_sustain = 1.0   # hours; matches MILP default
-        mfrr_sustain = 2.0
+        # Sustain windows from the single source of truth (see
+        # market_constants). Handed in at construction or via
+        # configure_sustain_hours(); identical to what the MILP was built
+        # with, so a MILP-feasible bid always survives this clip.
+        fcr_sustain = self.sustain.fcr
+        afrr_sustain = self.sustain.afrr
+        mfrr_sustain = self.sustain.mfrr
         _use_lock = (self.enable_commitments and hour is not None)
 
         for a in self.agents:
@@ -1018,18 +1086,20 @@ class MultiBESSEnv(ParallelEnv):
 
                 # 3) Sustain pre-check on services. Upward needs energy
                 # to discharge for sustain hours; downward needs headroom.
-                # FCR symmetric: needs both up- and down-room for 4 hours
-                # (Terna FCR Cooperation: 4h minimum sustain to qualify).
-                # NOTE: previously this used 0.25h, which dramatically over-
-                # estimated the bidding capacity available for FCR — the env
-                # was accepting bids that would not be qualified for FCR at
-                # the real Terna market. Setting to 4h aligns the env with
-                # both `flexibility_market.py` (min_duration=4) and the MILP
-                # LP, which uses the true sustain via the SOC reserve
-                # constraint. The change makes the PPO learn an FCR strategy
-                # that is realisable in practice, matching what the MILP can
-                # also realise.
-                fcr_sustain = 4.0
+                # FCR is symmetric, so it needs both up- and down-room for
+                # tau_FCR.
+                #
+                # REVISION NOTE (Reviewer 2, point 2): this was hard-coded to
+                # 4.0 h on the argument that Terna requires a 4 h sustain to
+                # qualify. That is wrong. SO GL (Reg. EU 2017/1485) Art.
+                # 156(10) bounds the minimum activation period for FCR
+                # providers between 15 and 30 minutes, and Art. 156(9) sets
+                # 15 minutes as the fallback for limited-energy reservoirs,
+                # which is what a BESS is. At 4 h a 2 h fleet cannot offer
+                # FCR at rated power at all, which is what pushed the
+                # policies onto the restoration products. The window now
+                # comes from self.sustain (0.25 h by default) and is swept
+                # explicitly in the tau_FCR sensitivity.
                 fcr_energy_cap = max(0.0, (soc - self.soc_min) * cap) / max(fcr_sustain, 1e-9)
                 fcr_room_cap = max(0.0, (self.soc_max - soc) * cap) / max(fcr_sustain, 1e-9)
                 R_fcr = min(R_fcr, fcr_energy_cap, fcr_room_cap)
@@ -1043,6 +1113,40 @@ class MultiBESSEnv(ParallelEnv):
                 R_mfrr_up = min(R_mfrr_up, mfrr_up_cap)
                 mfrr_dn_cap = max(0.0, (self.soc_max - soc) * cap) / max(mfrr_sustain, 1e-9)
                 R_mfrr_dn = min(R_mfrr_dn, mfrr_dn_cap)
+
+                # 3b) FIX A: JOINT sustain budget per direction (MILP Eq. 4-5
+                # parity). The caps above are PER-SERVICE: each one checks the
+                # full SoC headroom on its own, so the same energy budget is
+                # counted once per service and the stacked commitment can
+                # reach ~3x what the battery can sustain. Here the SUM of
+                # committed energy per direction is capped by the SoC budget;
+                # FCR (symmetric) counts on both sides. Proportional scaling
+                # preserves the bid mix (no arbitrary service priority).
+                # Budget conventions are chosen to DOMINATE the MILP's own
+                # sustain constraints, so any MILP-feasible bid passes
+                # untouched (up: MILP uses <= headroom*eta_d <= headroom;
+                # dn: matches the Step-D absorbable-energy convention
+                # headroom/eff): MILP replay and BC stay no-ops by
+                # construction. Applies in BOTH training and evaluation.
+                if self.enforce_joint_sustain:
+                    E_up_budget = max(0.0, (soc - self.soc_min) * cap)
+                    E_dn_budget = max(0.0, (self.soc_max - soc) * cap / eff)
+                    need_up = (R_fcr * fcr_sustain
+                               + R_afrr_up * afrr_sustain
+                               + R_mfrr_up * mfrr_sustain)
+                    if need_up > E_up_budget and need_up > 1e-12:
+                        s_up = E_up_budget / need_up
+                        R_fcr *= s_up
+                        R_afrr_up *= s_up
+                        R_mfrr_up *= s_up
+                    need_dn = (R_fcr * fcr_sustain
+                               + R_afrr_dn * afrr_sustain
+                               + R_mfrr_dn * mfrr_sustain)
+                    if need_dn > E_dn_budget and need_dn > 1e-12:
+                        s_dn = E_dn_budget / need_dn
+                        R_fcr *= s_dn
+                        R_afrr_dn *= s_dn
+                        R_mfrr_dn *= s_dn
 
                 # 4) Arbitrage SOC feasibility
                 P_ch_max = max(0.0, (self.soc_max - soc) * cap / eff)
