@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pulp
 
@@ -85,6 +85,7 @@ class MultiBatteryParameters:
     def heterogeneous_fleet(
         cls, seed: int = 0,
         n_commercial: int = 20, n_industrial: int = 20, n_utility: int = 10,
+        durations: Optional[Tuple[float, float, float]] = None,
     ) -> 'MultiBatteryParameters':
         """Three-cluster realistic Italian BSP/UVAM portfolio.
 
@@ -104,12 +105,45 @@ class MultiBatteryParameters:
         cost noise. This isolates the multi-asset coordination question
         from the cost-asymmetry question (deferred to Step 3+4).
 
+        HETEROGENEOUS DURATIONS
+        -----------------------
+        By default all three clusters have an energy-to-power ratio of 2 h,
+        so they differ only in SCALE. Reviewers of the EI.A submission
+        rejected the multi-agent framing on exactly this ground: identical
+        E/P, efficiency and costs mean the units face the same trade-off and
+        the fleet is effectively N independent single-agent problems.
+
+        `durations` breaks that. Passing a per-cluster duration in hours
+        rebuilds each cluster as capacity = power x duration, holding the
+        POWER ratings fixed. Power is held rather than energy because the
+        per-service 1 MW participation threshold and the market-facing
+        capability are what determine market access; energy is the quantity
+        being varied deliberately. Total fleet energy therefore changes, and
+        the caller should report both totals.
+
+            durations=None          20x1.0 + 20x2.0 + 10x5.0 MWh
+                                    = 55 MW, 110 MWh, uniform 2 h
+            durations=(1., 2., 4.)  20x0.5 + 20x2.0 + 10x10.0 MWh
+                                    = 55 MW, 150 MWh
+            durations=(4., 2., 1.)  20x2.0 + 20x2.0 + 10x2.5 MWh
+                                    = 55 MW, 105 MWh
+
+        The reversed assignment is worth considering: it keeps total energy
+        within 5% of the uniform baseline, so profits stay comparable to the
+        earlier runs while the sustain constraints still bind asymmetrically
+        across clusters. Physically both are defensible (short-duration
+        utility units for fast frequency response, longer-duration
+        behind-the-meter units for peak shaving).
+
         Parameters
         ----------
         seed : int
             Seed for the random initial-SOC sampling. Reproducible.
         n_commercial, n_industrial, n_utility : int
             Number of BESS per cluster. Default (20, 20, 10) sums to N=50.
+        durations : tuple of three floats, optional
+            Energy-to-power ratio in hours for (commercial, industrial,
+            utility). None keeps the legacy uniform 2 h sizing.
 
         Returns
         -------
@@ -127,6 +161,27 @@ class MultiBatteryParameters:
             (n_industrial, 2.0, 1.0, 8000, 25000.0),
             (n_utility,    5.0, 2.5, 8000, 25000.0),
         ]
+
+        if durations is not None:
+            if len(durations) != 3:
+                raise ValueError(
+                    "durations must give three values, one per cluster "
+                    f"(commercial, industrial, utility); got {durations!r}")
+            if any(float(d) <= 0.0 for d in durations):
+                raise ValueError(
+                    f"durations must be strictly positive, got {durations!r}")
+            # Hold power, recompute energy. Index 1 is capacity_mwh, index 2
+            # is max_power_mw in each cluster tuple.
+            cluster_specs = [
+                (spec[0], float(spec[2]) * float(dur), spec[2], spec[3],
+                 spec[4])
+                for spec, dur in zip(cluster_specs, durations)
+            ]
+            _tp = sum(s[0] * s[2] for s in cluster_specs)
+            _te = sum(s[0] * s[1] for s in cluster_specs)
+            print(f"  [fleet] heterogeneous durations "
+                  f"{tuple(float(d) for d in durations)} h -> "
+                  f"{_tp:.1f} MW, {_te:.1f} MWh")
 
         batteries: List[BatteryParameters] = []
         for n, cap, pmax, cyc, dcost in cluster_specs:
@@ -147,13 +202,16 @@ class MultiBatteryParameters:
     def cluster_of(self, i: int) -> str:
         """Return the cluster label of battery i based on its sizing.
 
-        Uses capacity_mwh thresholds matching the heterogeneous_fleet
-        specification. Useful for per-cluster reporting and plotting.
+        Classifies on max_power_mw, not on capacity_mwh. The power ratings
+        (0.5 / 1.0 / 2.5 MW) are what heterogeneous_fleet holds fixed, so
+        this stays correct when the clusters are given different durations;
+        a capacity-based rule would misfile a 1 h utility unit (2.5 MWh) as
+        industrial.
         """
-        cap = self.batteries[i].capacity_mwh
-        if cap <= 1.25:
+        p = self.batteries[i].max_power_mw
+        if p <= 0.75:
             return 'commercial'
-        if cap <= 3.5:
+        if p <= 1.75:
             return 'industrial'
         return 'utility'
 
@@ -226,7 +284,9 @@ class MultiBESSMILPOptimizer:
     SOLVER_TIME_LIMIT_S = 300
     SOLVER_GAP_REL = 0.01  # 1% optimality gap accepted as "Optimal"
 
-    FORCE_CBC = True
+    # FORCE_CBC removed: it was never read, and _build_solver actually
+    # prefers Gurobi. A flag claiming to force CBC while the code does the
+    # opposite is worse than no flag at all.
     @classmethod
     def _build_solver(cls):
         """Return a PuLP solver, preferring Gurobi (academic licence) over CBC.
@@ -270,7 +330,8 @@ class MultiBESSMILPOptimizer:
                  afrr_sustain_hours: float = 1.0,
                  mfrr_sustain_hours: float = 2.0,
                  enable_commitments: bool = False,
-                 penalty_k: float = 1.5):
+                 penalty_k: float = 1.5,
+                 coupling=None):
         """Multi-BESS MILP under BSP aggregation.
 
         Parameters
@@ -350,6 +411,13 @@ class MultiBESSMILPOptimizer:
         # AND charge R*sustain. Default ON; sustain duration 15min = 0.25h.
         self.fcr_symmetric_capability = bool(fcr_symmetric_capability)
         self.fcr_sustain_hours = float(fcr_sustain_hours)
+
+        # Fleet-level coupling (shared connection capacity). Must be the SAME
+        # object the environment receives; see fleet_coupling for why the two
+        # are kept in one place.
+        from fleet_coupling import FleetCoupling as _FleetCoupling
+        self.coupling = (coupling if coupling is not None
+                         else _FleetCoupling.uncoupled())
 
         # Directional services mode: when True, aFRR and mFRR are split into
         # upward (BSP discharges on activation) and downward (BSP charges)
@@ -609,6 +677,43 @@ class MultiBESSMILPOptimizer:
                     self.problem += v[f'A_{s}'][(i, t)] <= v[f'R_{s}'][(i, t)], \
                         f"A{s}_LeqR_{i}_{t}"
 
+    def _add_connection_constraints(self, v: Dict, T: int):
+        """Shared grid connection limit: the only constraint that couples the
+        units to each other.
+
+        Per hour, the connection must be able to carry the worst case in each
+        direction, so scheduled arbitrage power and reserved bands are both
+        counted. FCR is symmetric and loads both sides. The same envelope is
+        enforced by the environment (fleet_coupling.project_to_connection),
+        so a schedule feasible here survives the environment unchanged.
+
+        Skipped entirely when no coupling is configured, which reproduces the
+        uncoupled formulation of the submitted paper bit for bit.
+        """
+        coupling = getattr(self, "coupling", None)
+        if coupling is None or not coupling.is_active:
+            return
+        limit = float(coupling.connection_limit_mw)
+        N = self.multi_params.n_batteries
+
+        if self.directional_services:
+            up_keys = ['fcr', 'afrr_up', 'mfrr_up']
+            dn_keys = ['fcr', 'afrr_dn', 'mfrr_dn']
+        else:
+            # legacy 5-axis: aFRR and mFRR are symmetric, so they load both
+            up_keys = ['fcr', 'afrr', 'mfrr']
+            dn_keys = ['fcr', 'afrr', 'mfrr']
+
+        for t in range(T):
+            up = pulp.lpSum(
+                [v['P_discharge'][(i, t)] for i in range(N)]
+                + [v[f'R_{k}'][(i, t)] for k in up_keys for i in range(N)])
+            dn = pulp.lpSum(
+                [v['P_charge'][(i, t)] for i in range(N)]
+                + [v[f'R_{k}'][(i, t)] for k in dn_keys for i in range(N)])
+            self.problem += up <= limit, f"ConnUp_{t}"
+            self.problem += dn <= limit, f"ConnDn_{t}"
+
     def _add_aggregate_market_constraints(
         self, v: Dict, T: int,
         flexibility_services: List[List[FlexibilityService]],
@@ -778,6 +883,7 @@ class MultiBESSMILPOptimizer:
         # Constraints
         self._add_battery_constraints(v, time_horizon)
         self._add_aggregate_market_constraints(v, time_horizon, flexibility_services)
+        self._add_connection_constraints(v, time_horizon)
 
         # Objective
         self.problem += self._build_objective(v, time_horizon, energy_prices,

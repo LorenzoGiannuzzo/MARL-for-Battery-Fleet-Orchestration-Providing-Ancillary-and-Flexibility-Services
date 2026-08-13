@@ -1,0 +1,2 @@
+config_key,config_label,n_seeds,ppo_mean_eur,ppo_std_eur,ppo_share_mean,ppo_share_std,bc_mean_eur,milp_mean_eur,random_mean_eur
+W,PPO warm start (full),1,9976126.189559951,nan,0.8726842548928478,nan,11220525.695007464,11431541.400715275,549792.9902198855

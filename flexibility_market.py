@@ -143,6 +143,11 @@ class FlexibilityMarket:
                 'response_time': 30,      # seconds
                 'min_capacity': 1.0,      # MW
                 'max_duration': 24,       # hours
+                # INERT metadata: min_duration is carried on the service
+                # object but never read by any constraint. The binding sustain
+                # window is market_constants.DEFAULT_SUSTAIN.fcr = 0.25 h
+                # (SO GL Art. 156). Do not read this value as the model's
+                # requirement.
                 'min_duration': 4,        # hours
             },
             ServiceType.AFRR: {

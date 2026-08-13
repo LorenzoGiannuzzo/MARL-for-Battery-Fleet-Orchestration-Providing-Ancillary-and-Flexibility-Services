@@ -1,0 +1,2 @@
+config_key,config_label,seed,sustain_label,tau_fcr,durations,milp_discrete_eur,milp_objective_eur,bc_eur,ppo_eur,ppo_eur_stochastic,random_eur,ppo_share_of_milp,bc_share_of_milp,wall_seconds,ok,collapsed,error
+"W","PPO warm start (full)",0,"sogl_default",0.25,"[1.0, 2.0, 4.0]",11431541.400715275,10880650.26734647,11220525.695007464,9976126.189559951,8402757.295240715,549792.9902198855,0.8726842548928478,0.9815409227582723,82240.6350722313,True,False,""

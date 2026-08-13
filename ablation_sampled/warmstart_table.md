@@ -1,13 +1,13 @@
 # Warm-start ablation (warmstart)
 
-Generated 2026-08-09 15:16. Profits in M EUR over the held-out window, mean ± sample standard deviation across seeds.
+Generated 2026-08-08 07:06. Profits in M EUR over the held-out window, mean ± sample standard deviation across seeds.
 
 | Config | Init | LR | Entropy | KL anchor | Profit argmax [M EUR] | Profit sampled [M EUR] | Share of MILP | n |
 |---|---|---|---|---|---|---|---|---|
-| Discrete MILP benchmark | – | – | – | – | 0.01 | – | 1.000 | 1 |
-| Behavioural clone (no RL) | – | – | – | – | 0.01 | – | 1.097 | 1 |
-| PPO warm start (full) | BC | 0.1x | 0 | yes | 0.02 | 0.01 | 1.171 | 1 |
-| Random baseline | – | – | – | – | -0.00 | – | – | 1 |
+| Discrete MILP benchmark | – | – | – | – | 11.57 | – | 1.000 | 1 |
+| Behavioural clone (no RL) | – | – | – | – | 11.47 | – | 0.991 | 1 |
+| PPO warm start (full) | BC | 0.1x | 0 | yes | 10.83 | 9.21 | 0.936 | 1 |
+| Random baseline | – | – | – | – | 0.69 | – | – | 1 |
 
 ## Reading the ladder
 

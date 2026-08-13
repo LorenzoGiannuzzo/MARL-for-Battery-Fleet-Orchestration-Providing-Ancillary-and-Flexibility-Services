@@ -87,6 +87,7 @@ import numpy as np
 
 from market_constants import (SustainDurations, DEFAULT_SUSTAIN,
                               TAU_FCR_SWEEP)
+from fleet_coupling import FleetCoupling
 
 
 # ===========================================================================
@@ -139,6 +140,25 @@ class CellResult:
     seed: int
     sustain_label: str
     tau_fcr: float
+    # Per-cluster storage durations in hours, or None for the uniform 2 h
+    # fleet. Recorded so a results file can never be mistaken for the wrong
+    # fleet after the fact.
+    durations: Optional[List[float]] = None
+    # True when each asset cluster got its own PPO policy instead of one
+    # shared across all units.
+    per_cluster_policies: bool = False
+    # True when the policy received the duration-relative observation features
+    # (usable energy, headroom and duration expressed in hours at rated power).
+    duration_features: bool = True
+    # Shared connection limit in MW, or None when the units are uncoupled.
+    connection_limit_mw: Optional[float] = None
+    # Hash of the configuration that produced this cell. A checkpoint is only
+    # reused when it matches, so results can never be served across
+    # experiments.
+    config_fingerprint: str = ""
+    config_summary: Dict[str, Any] = field(default_factory=dict)
+    # True when the value head saw the fleet-level global state (CTDE).
+    centralized_critic: bool = False
 
     # headline profits on the held-out window, EUR
     milp_discrete_eur: float = float("nan")
@@ -178,8 +198,28 @@ class CellResult:
 # Runner
 # ===========================================================================
 
-def _cell_path(outdir: str, cfg_key: str, seed: int, tag: str) -> str:
-    return os.path.join(outdir, f"cell_{tag}_{cfg_key}_seed{seed}.json")
+def config_fingerprint(**parts) -> str:
+    """Short stable hash of everything that changes a cell's result.
+
+    WHY. The checkpoint key used to be only (tag, config, seed), which says
+    nothing about the fleet, the data, or the flags. A smoke run therefore
+    read back a cell produced by an entirely different experiment and
+    reported it as its own: a 10.87 M EUR figure from a 50-unit uniform-2h
+    synthetic run was served to a 3-unit heterogeneous run on real prices,
+    with no error and no warning.
+
+    Anything that changes the number belongs in here. Anything that does not,
+    such as the output directory, must stay out or every run would look new.
+    """
+    import hashlib
+    payload = json.dumps(parts, sort_keys=True, default=str)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
+
+
+def _cell_path(outdir: str, cfg_key: str, seed: int, tag: str,
+               fingerprint: str = "nofp") -> str:
+    return os.path.join(
+        outdir, f"cell_{tag}_{cfg_key}_seed{seed}_{fingerprint}.json")
 
 
 def run_cell(
@@ -193,10 +233,15 @@ def run_cell(
     sustain: SustainDurations,
     ppo_iterations: int,
     real_pun_xlsx_path: Optional[str],
+    price_column: str = "PUN",
     real_msd_xlsx_paths: Optional[List[str]],
     expected_reward_training: bool,
     milp_mode: str,
     extra_pipeline_kwargs: Dict[str, Any],
+    per_cluster_policies: bool = False,
+    duration_features: bool = True,
+    coupling: FleetCoupling = FleetCoupling.uncoupled(),
+    centralized_critic: bool = False,
 ) -> CellResult:
     """Run one (configuration, seed) pair through the full pipeline."""
     from marl_pipeline import run_full_pipeline
@@ -204,6 +249,15 @@ def run_cell(
     res = CellResult(
         config_key=cfg.key, config_label=cfg.label, seed=seed,
         sustain_label=sustain.label, tau_fcr=sustain.fcr,
+        # Read the distinct energy-to-power ratios straight off the fleet
+        # rather than threading a parameter down: whatever fleet was
+        # actually handed in is what the result describes.
+        durations=sorted({round(b.capacity_mwh / b.max_power_mw, 3)
+                          for b in fleet.batteries}),
+        per_cluster_policies=bool(per_cluster_policies),
+        duration_features=bool(duration_features),
+        connection_limit_mw=coupling.connection_limit_mw,
+        centralized_critic=bool(centralized_critic),
     )
     t0 = time.time()
     try:
@@ -223,10 +277,15 @@ def run_cell(
             warmstart_lr_scale=cfg.lr_scale,
             warmstart_entropy_coeff=cfg.entropy,
             use_kl_anchor=cfg.anchor,
+            per_cluster_policies=per_cluster_policies,
+            duration_features=duration_features,
+            coupling=coupling,
+            centralized_critic=centralized_critic,
             ppo_iterations=ppo_iterations,
             directional_services=True,
             real_pun_xlsx_path=real_pun_xlsx_path,
             real_msd_xlsx_paths=real_msd_xlsx_paths,
+            price_column=price_column,
             expected_reward_training=expected_reward_training,
             milp_mode=milp_mode,
             **extra_pipeline_kwargs,
@@ -287,13 +346,50 @@ def run_ablation(
     tag: str = "warmstart",
     real_pun_xlsx_path: Optional[str] = None,
     real_msd_xlsx_paths: Optional[List[str]] = None,
+    price_column: str = "PUN",
     expected_reward_training: bool = False,
     milp_mode: str = "discrete",
     extra_pipeline_kwargs: Optional[Dict[str, Any]] = None,
+    per_cluster_policies: bool = False,
+    duration_features: bool = True,
+    coupling: FleetCoupling = FleetCoupling.uncoupled(),
+    centralized_critic: bool = False,
+    # Ignore checkpoints and recompute. The fingerprint keys a cell by its
+    # CONFIGURATION, which is what makes results from different experiments
+    # impossible to confuse. It cannot know the CODE changed: a fix that alters
+    # what a stage computes without touching a flag leaves the key identical
+    # and the stale cell is served as current. This is the switch for that.
+    force: bool = False,
 ) -> List[CellResult]:
     os.makedirs(outdir, exist_ok=True)
     extra_pipeline_kwargs = extra_pipeline_kwargs or {}
     results: List[CellResult] = []
+
+    # Everything that changes a result. Read off the arguments this call
+    # actually received, so a flag added later without being listed here
+    # shows up as a stale checkpoint rather than as a silent reuse.
+    fp_parts = dict(
+        tag=tag,
+        n_units=fleet.n_batteries,
+        durations=sorted({round(b.capacity_mwh / b.max_power_mw, 3)
+                          for b in fleet.batteries}),
+        total_mw=round(sum(b.max_power_mw for b in fleet.batteries), 3),
+        train_start=str(train_start), train_days=train_days,
+        test_days=test_days, ppo_iterations=ppo_iterations,
+        sustain=sustain.as_dict(),
+        connection_limit_mw=coupling.connection_limit_mw,
+        centralized_critic=bool(centralized_critic),
+        duration_features=bool(duration_features),
+        per_cluster_policies=bool(per_cluster_policies),
+        price_column=price_column,
+        pun=(os.path.basename(str(real_pun_xlsx_path))
+             if isinstance(real_pun_xlsx_path, str)
+             else [os.path.basename(str(p)) for p in (real_pun_xlsx_path or [])]),
+        msd=[os.path.basename(str(p)) for p in (real_msd_xlsx_paths or [])],
+        expected_reward_training=bool(expected_reward_training),
+        milp_mode=milp_mode,
+    )
+    fp = config_fingerprint(**fp_parts)
 
     total = len(configs) * len(seeds)
     done = 0
@@ -302,22 +398,55 @@ def run_ablation(
           f"= {total} runs")
     print(f"  sustain: {sustain.describe()}")
     print(f"  PPO iterations per run: {ppo_iterations}")
+    print(f"  day-ahead series: {price_column}"
+          + ("  (SYNTHETIC prices: the flag has no effect)"
+             if real_pun_xlsx_path is None else ""))
+    print(f"  fleet coupling: {coupling.describe()}")
+    print(f"  centralised critic: "
+          f"{'ON (CTDE)' if centralized_critic else 'OFF'}")
+    print(f"  duration-relative obs features: "
+          f"{'ON' if duration_features else 'OFF (zeroed, same network shape)'}")
+    print(f"  policies: "
+          f"{'ONE PER CLUSTER (no parameter sharing)' if per_cluster_policies else 'ONE SHARED across all units'}")
     print(f"  training reward: "
           f"{'EXPECTED (MILP-aligned)' if expected_reward_training else 'SAMPLED (Bernoulli draws)'}")
     print(f"  outdir: {outdir}")
+    print(f"  config fingerprint: {fp}   (checkpoints are reused only for "
+          f"an identical configuration)")
+    if force:
+        print("  --force: ignoring any existing checkpoint and recomputing")
     print("=" * 74)
 
     for cfg in configs:
         for seed in seeds:
             done += 1
-            path = _cell_path(outdir, cfg.key, seed, tag)
-            if os.path.exists(path):
+            path = _cell_path(outdir, cfg.key, seed, tag, fp)
+            if os.path.exists(path) and not force:
                 with open(path, "r", encoding="utf-8") as f:
                     cached = CellResult(**json.load(f))
-                results.append(cached)
-                print(f"[{done}/{total}] {cfg.key:<4} seed={seed}  CACHED "
-                      f"(ppo {cached.ppo_eur:,.0f} EUR)")
-                continue
+                if cached.config_fingerprint and cached.config_fingerprint != fp:
+                    # Defensive: the filename already carries the hash, so this
+                    # only fires if a file was renamed or hand-edited.
+                    print(f"[{done}/{total}] {cfg.key:<4} seed={seed}  "
+                          f"checkpoint is from a DIFFERENT configuration "
+                          f"({cached.config_fingerprint} != {fp}); re-running")
+                    cached = None
+                elif not cached.ok:
+                    # A checkpoint written by an older version recorded the
+                    # failure itself. Ignore and re-run rather than replaying
+                    # a crash forever.
+                    print(f"[{done}/{total}] {cfg.key:<4} seed={seed}  "
+                          f"discarding a FAILED checkpoint and re-running")
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                    cached = None
+                if cached is not None:
+                    results.append(cached)
+                    print(f"[{done}/{total}] {cfg.key:<4} seed={seed}  CACHED "
+                          f"(ppo {cached.ppo_eur:,.0f} EUR)")
+                    continue
 
             print(f"\n[{done}/{total}] {cfg.key:<4} seed={seed}  "
                   f"{cfg.label}")
@@ -329,12 +458,26 @@ def run_ablation(
                 sustain=sustain, ppo_iterations=ppo_iterations,
                 real_pun_xlsx_path=real_pun_xlsx_path,
                 real_msd_xlsx_paths=real_msd_xlsx_paths,
+                price_column=price_column,
                 expected_reward_training=expected_reward_training,
                 milp_mode=milp_mode,
                 extra_pipeline_kwargs=extra_pipeline_kwargs,
+                per_cluster_policies=per_cluster_policies,
+                duration_features=duration_features,
+                coupling=coupling,
+                centralized_critic=centralized_critic,
             )
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(asdict(r), f, indent=2)
+            r.config_fingerprint = fp
+            r.config_summary = dict(fp_parts)
+            # Checkpoint SUCCESSES only. A failed cell used to be written to
+            # disk like any other, so the next launch read the failure back as
+            # "CACHED (ppo nan EUR)" and never retried it: fixing the bug that
+            # caused the failure changed nothing until the file was deleted by
+            # hand. A checkpoint is a record of work done, and a crash is not
+            # work done.
+            if r.ok:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(asdict(r), f, indent=2)
             results.append(r)
             if not r.ok:
                 status = f"FAILED ({r.error})"
@@ -376,8 +519,12 @@ def write_reports(results: List[CellResult], outdir: str,
     # ---- raw ----
     raw_path = os.path.join(outdir, f"{tag}_raw.csv")
     cols = ["config_key", "config_label", "seed", "sustain_label", "tau_fcr",
+            "durations",
             "milp_discrete_eur", "milp_objective_eur", "bc_eur", "ppo_eur",
-            "ppo_eur_stochastic", "random_eur", "ppo_share_of_milp",
+            "per_cluster_policies", "duration_features",
+            "connection_limit_mw", "centralized_critic",
+            "ppo_eur_stochastic", "random_eur",
+            "ppo_share_of_milp",
             "bc_share_of_milp",
             "wall_seconds", "ok", "collapsed", "error"]
     with open(raw_path, "w", encoding="utf-8") as f:
@@ -385,7 +532,8 @@ def write_reports(results: List[CellResult], outdir: str,
         for r in results:
             d = asdict(r)
             f.write(",".join(
-                f'"{d[c]}"' if isinstance(d[c], str) else f"{d[c]}"
+                f'"{d[c]}"' if isinstance(d[c], (str, list, type(None)))
+                else f"{d[c]}"
                 for c in cols) + "\n")
     paths["raw"] = raw_path
 
@@ -506,8 +654,16 @@ def run_tau_sweep(
     ppo_iterations: int = 0,
     real_pun_xlsx_path: Optional[str] = None,
     real_msd_xlsx_paths: Optional[List[str]] = None,
+    price_column: str = "PUN",
     milp_mode: str = "discrete",
     extra_pipeline_kwargs: Optional[Dict[str, Any]] = None,
+    # These must be threaded here too. Without them the sweep silently runs
+    # with library defaults no matter what the caller asked for, so
+    # `--mode tau_fcr --connection-fraction 0.6` would report an uncoupled
+    # sensitivity while claiming to be a coupled one.
+    coupling: FleetCoupling = FleetCoupling.uncoupled(),
+    duration_features: bool = True,
+    per_cluster_policies: bool = False,
 ) -> List[CellResult]:
     """tau_FCR sensitivity (Reviewer 2 pt 2, Reviewer 1 pt 2).
 
@@ -551,9 +707,16 @@ def run_tau_sweep(
                     directional_services=True,
                     real_pun_xlsx_path=real_pun_xlsx_path,
                     real_msd_xlsx_paths=real_msd_xlsx_paths,
+                    price_column=price_column,
                     milp_mode=milp_mode,
+                    coupling=coupling,
+                    duration_features=duration_features,
+                    per_cluster_policies=per_cluster_policies,
                     **extra_pipeline_kwargs,
                 )
+                r.connection_limit_mw = coupling.connection_limit_mw
+                r.duration_features = bool(duration_features)
+                r.per_cluster_policies = bool(per_cluster_policies)
                 r.milp_discrete_eur = float(res.test_total_milp_profit_eur)
                 r.bc_eur = float(res.test_total_bc_profit_eur)
                 r.random_eur = float(res.test_total_random_profit_eur)
@@ -566,8 +729,9 @@ def run_tau_sweep(
                 traceback.print_exc()
             r.wall_seconds = time.time() - t0
             r.finalise()
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(asdict(r), f, indent=2)
+            if r.ok:   # successes only; see run_ablation for why
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(asdict(r), f, indent=2)
             out.append(r)
     return out
 
@@ -576,15 +740,26 @@ def run_tau_sweep(
 # CLI
 # ===========================================================================
 
-def _build_fleet(smoke: bool):
+def _build_fleet(smoke: bool, durations=None):
+    """Build the fleet, optionally with per-cluster storage durations.
+
+    `durations` is (commercial, industrial, utility) in hours. None keeps
+    the uniform 2 h sizing of the submitted paper. In smoke mode the three
+    units take the three durations directly, so the plumbing is exercised
+    without paying for the full fleet.
+    """
     from marl_milp_continuous import MultiBatteryParameters
     from milp_optimizer import BatteryParameters
     if smoke:
-        bp = BatteryParameters(capacity_mwh=2.0, max_power_mw=1.0,
-                               degradation_cost_per_mwh=25000.0,
-                               cycle_life=8000)
-        return MultiBatteryParameters([bp] * 3)
-    return MultiBatteryParameters.heterogeneous_fleet(seed=0)
+        powers = (0.5, 1.0, 2.5)
+        durs = durations if durations else (2.0, 2.0, 2.0)
+        return MultiBatteryParameters([
+            BatteryParameters(capacity_mwh=p * d, max_power_mw=p,
+                              degradation_cost_per_mwh=25000.0,
+                              cycle_life=8000)
+            for p, d in zip(powers, durs)])
+    return MultiBatteryParameters.heterogeneous_fleet(
+        seed=0, durations=durations)
 
 
 def main(argv=None):
@@ -601,9 +776,33 @@ def main(argv=None):
     ap.add_argument("--test-days", type=int, default=365)
     ap.add_argument("--train-start", default="2023-01-01")
     ap.add_argument("--outdir", default="ablation_results")
-    ap.add_argument("--pun-xlsx", default=None,
-                    help="GME price workbook; omit to use the synthetic series")
+    ap.add_argument("--force", action="store_true",
+                    help="recompute even if a checkpoint exists. The "
+                         "fingerprint keys a cell by its configuration and "
+                         "cannot see that the CODE changed, so use this after "
+                         "any fix that alters what a stage computes without "
+                         "changing a flag.")
+    ap.add_argument("--synthetic", action="store_true",
+                    help="run on SYNTHETIC prices. Required to be explicit: "
+                         "without --pun-xlsx the pipeline silently fell back "
+                         "to generated prices, and every revision run so far "
+                         "was synthetic without that being obvious from the "
+                         "command. Synthetic data is for plumbing checks; no "
+                         "number produced from it belongs in the paper.")
+    ap.add_argument("--pun-xlsx", nargs="*", default=None,
+                    help="GME day-ahead price workbook(s). Accepts SEVERAL: "
+                         "the training and test years are usually separate "
+                         "exports, and the loader concatenates them in date "
+                         "order. Omit only together with --synthetic.")
     ap.add_argument("--msd-xlsx", nargs="*", default=None)
+    ap.add_argument("--price-column", default="PUN",
+                    help="which day-ahead series to settle at. The PUN is the "
+                         "national reference price for CONSUMERS; generation "
+                         "and storage settle at the ZONAL price, so a northern "
+                         "fleet whose MSD data is EsitiMSD_*_Nord should use "
+                         "NORD. Requires the GME 'MGPPrezzi' workbook, which "
+                         "carries one column per zone; the 'MGP-PUNPUN' export "
+                         "has only the national price and will raise.")
     ap.add_argument("--milp-mode", choices=("continuous", "discrete"),
                     default="discrete")
     ap.add_argument("--sampled-training", action="store_true",
@@ -612,9 +811,67 @@ def main(argv=None):
     ap.add_argument("--tau", type=float, default=None,
                     help="tau_FCR for the warm-start ablation "
                          "(default: SO GL 0.25 h)")
+    ap.add_argument("--centralized-critic", action="store_true",
+                    help="give the value head the fleet-level global state "
+                         "while the policy head keeps only its own (CTDE). "
+                         "Only meaningful with a coupling: without one the "
+                         "joint value is the sum of the individual ones.")
+    ap.add_argument("--connection-limit", type=float, default=None,
+                    metavar="MW",
+                    help="shared grid connection limit in MW. This is the only "
+                         "constraint that couples the units to each other, so "
+                         "it is what turns N independent problems into a "
+                         "coordination problem. Omit for the uncoupled "
+                         "formulation of the submitted paper.")
+    ap.add_argument("--connection-fraction", type=float, default=None,
+                    metavar="F",
+                    help="alternative to --connection-limit: size the "
+                         "connection as a fraction of the summed unit ratings. "
+                         "1.0 never binds; 0.4 to 0.8 is the interesting range.")
+    ap.add_argument("--no-duration-features", action="store_true",
+                    help="zero the duration-relative observation features "
+                         "(usable energy, headroom and duration in hours at "
+                         "rated power). The slots stay in the vector, so the "
+                         "network shape is identical and the comparison "
+                         "isolates information content.")
+    ap.add_argument("--per-cluster-policies", action="store_true",
+                    help="train one PPO policy per asset cluster instead of "
+                         "one shared across all units. The same clone is "
+                         "transferred into every policy, so the run isolates "
+                         "the effect of parameter sharing.")
+    ap.add_argument("--durations", type=float, nargs=3, default=None,
+                    metavar=("COMMERCIAL", "INDUSTRIAL", "UTILITY"),
+                    help="per-cluster storage duration in hours, e.g. "
+                         "--durations 1 2 4. Omit for the uniform 2 h fleet "
+                         "of the submitted paper. Power ratings are held "
+                         "fixed, so total fleet energy changes: 1 2 4 gives "
+                         "55 MW / 150 MWh, 4 2 1 gives 55 MW / 105 MWh "
+                         "against the uniform 55 MW / 110 MWh.")
     ap.add_argument("--smoke", action="store_true",
                     help="3 units, 10 days, 2 PPO iterations: plumbing only")
     args = ap.parse_args(argv)
+
+    # Real market data unless synthetic is asked for OUT LOUD. A silent
+    # fallback to generated prices costs a day of compute and produces a
+    # number that cannot be cited, which is worse than not running at all.
+    if args.pun_xlsx is None and not args.synthetic and not args.smoke:
+        print("no market data given.\n"
+              "  Pass --pun-xlsx with the GME workbook (and --msd-xlsx for the\n"
+              "  reserve data), or --synthetic to say explicitly that generated\n"
+              "  prices are wanted. Synthetic runs are for plumbing checks: no\n"
+              "  number from them belongs in the paper.\n"
+              "  For a northern-zone fleet add --price-column NORD, which needs\n"
+              "  the multi-zone 'MGPPrezzi' export rather than 'MGP-PUNPUN'.")
+        return 2
+    if args.pun_xlsx is not None and args.price_column.upper() == "PUN":
+        print("[warn] settling the day-ahead leg at the national PUN while the\n"
+              "       reserve data is zonal is the inconsistency Reviewer 2\n"
+              "       raised. Pass --price-column NORD unless you mean it.")
+
+    # The loader takes a str or a list; normalise a single path so both the
+    # one-file and the several-file cases behave identically downstream.
+    if args.pun_xlsx is not None and len(args.pun_xlsx) == 1:
+        args.pun_xlsx = args.pun_xlsx[0]
 
     train_start = datetime.strptime(args.train_start, "%Y-%m-%d")
     train_days, test_days = args.train_days, args.test_days
@@ -624,7 +881,28 @@ def main(argv=None):
         train_days, test_days, ppo_iters, seeds = 10, 5, 2, [0]
         print("[smoke] 3 units, 10 train / 5 test days, 2 PPO iters, 1 seed")
 
-    fleet = _build_fleet(args.smoke)
+    durations = tuple(args.durations) if args.durations else None
+    fleet = _build_fleet(args.smoke, durations=durations)
+    if args.connection_limit is not None and args.connection_fraction is not None:
+        print("give either --connection-limit or --connection-fraction, "
+              "not both")
+        return 2
+    if args.connection_limit is not None:
+        coupling = FleetCoupling.connection(args.connection_limit)
+    elif args.connection_fraction is not None:
+        coupling = FleetCoupling.as_fraction_of_fleet(
+            fleet, args.connection_fraction)
+    else:
+        coupling = FleetCoupling.uncoupled()
+    if durations:
+        _tp = sum(b.max_power_mw for b in fleet.batteries)
+        _te = sum(b.capacity_mwh for b in fleet.batteries)
+        print(f"[fleet] durations (commercial, industrial, utility) = "
+              f"{durations} h  ->  {_tp:.1f} MW, {_te:.1f} MWh "
+              f"across {fleet.n_batteries} units")
+        print("[fleet] NOTE: the fleet differs from the uniform-2h runs, so "
+              "absolute profits are NOT comparable across the two setups; "
+              "compare the PPO-vs-clone gap instead.")
     sustain = (SustainDurations.with_tau_fcr(args.tau) if args.tau
                else DEFAULT_SUSTAIN)
 
@@ -636,7 +914,11 @@ def main(argv=None):
             ppo_iterations=0 if not args.smoke else ppo_iters,
             real_pun_xlsx_path=args.pun_xlsx,
             real_msd_xlsx_paths=args.msd_xlsx,
+            price_column=args.price_column,
             milp_mode=args.milp_mode,
+            coupling=coupling,
+            duration_features=(not args.no_duration_features),
+            per_cluster_policies=args.per_cluster_policies,
         )
         write_reports(res, args.outdir, tag="tau")
         return 0
@@ -656,8 +938,14 @@ def main(argv=None):
         sustain=sustain, ppo_iterations=ppo_iters, outdir=args.outdir,
         real_pun_xlsx_path=args.pun_xlsx,
         real_msd_xlsx_paths=args.msd_xlsx,
+        price_column=args.price_column,
         expected_reward_training=(not args.sampled_training),
         milp_mode=args.milp_mode,
+        per_cluster_policies=args.per_cluster_policies,
+        duration_features=(not args.no_duration_features),
+        coupling=coupling,
+        centralized_critic=args.centralized_critic,
+        force=args.force,
     )
     write_reports(res, args.outdir, tag="warmstart")
 

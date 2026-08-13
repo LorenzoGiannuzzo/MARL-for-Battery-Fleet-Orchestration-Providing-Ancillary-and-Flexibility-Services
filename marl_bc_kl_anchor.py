@@ -155,7 +155,9 @@ class KLAnchoredPPOTorchLearner(PPOTorchLearner):
             )
             return total_loss
 
-        module = self.module[module_id].unwrapped()
+        # The KL is computed from fwd_out (the current policy's own forward
+        # output for this batch) against the frozen reference, so the module
+        # handle itself is not needed here.
         obs = batch[Columns.OBS]
         # Current policy logits for this batch
         cur_logits = fwd_out[Columns.ACTION_DIST_INPUTS]            # (B, n_axes*n_bins)
@@ -192,7 +194,7 @@ class KLAnchoredPPOTorchLearner(PPOTorchLearner):
 def make_kl_anchored_config(
     base_config,
     bc_net,
-    policy_id: str = "shared_policy",
+    policy_id="shared_policy",
     beta_start: float = 1.0,
     anneal_iters: int = 20,
     beta_floor: float = 0.1,
@@ -207,13 +209,26 @@ def make_kl_anchored_config(
     KL = vincolo che impedisce di allontanarsene troppo presto).
     """
     # Register the frozen BC reference for the learner to retrieve.
-    register_bc_reference(policy_id, BCReferenceModule(bc_net, device=device))
+    #
+    # policy_id may be a single id or a sequence of them. With per-cluster
+    # policies the SAME clone is registered under every trained policy, so
+    # each cluster is anchored to the same reference and the anchor is not
+    # silently applied to only one of the three. The learner resolves the
+    # reference by module_id first (see compute_loss_for_module), so a
+    # per-id registration is all that is needed; bc_kl_policy_id below stays
+    # as the fallback for the single-policy case.
+    policy_ids = ([policy_id] if isinstance(policy_id, str)
+                  else list(policy_id))
+    if not policy_ids:
+        raise ValueError("policy_id must name at least one policy")
+    for pid in policy_ids:
+        register_bc_reference(pid, BCReferenceModule(bc_net, device=device))
 
     learner_cfg = {
         "bc_kl_beta_start": float(beta_start),
         "bc_kl_anneal_iters": int(anneal_iters),
         "bc_kl_beta_floor": float(beta_floor),
-        "bc_kl_policy_id": policy_id,
+        "bc_kl_policy_id": policy_ids[0],
     }
     # Newer RLlib: .learners(); older: .training(). Prefer .learners() and
     # fall back gracefully so the same code runs on either version.

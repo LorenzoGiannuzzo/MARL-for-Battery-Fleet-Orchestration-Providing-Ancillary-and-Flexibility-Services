@@ -35,10 +35,19 @@ class TechnicalRequirements:
     afrr_min_capacity: float = 1.0
     mfrr_min_capacity: float = 1.0
     
-    # Duration requirements (hours)
-    fcr_min_duration: int = 4
-    afrr_min_duration: int = 4
-    mfrr_min_duration: int = 1
+    # Duration requirements: REMOVED.
+    #
+    # These three fields declared fcr=4 h, afrr=4 h, mfrr=1 h and were never
+    # read by anything. The live sustain windows are 0.25 / 1 / 2 h and come
+    # from market_constants.SustainDurations, which the MILP, the environment
+    # and the behavioural clone all share.
+    #
+    # They are deleted rather than corrected because dead constants that
+    # contradict the live ones are how this project ended up with tau_FCR
+    # defined in seven places and three different values active in a single
+    # run. A reviewer reading the repository would have taken 4 h as the
+    # modelled requirement. If a duration requirement is ever needed here,
+    # import it from market_constants instead of restating it.
 
 
 @dataclass

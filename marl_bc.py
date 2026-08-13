@@ -114,40 +114,13 @@ class BCPolicyNet(nn.Module):
 # Expert demo generation
 # ============================================================================
 
-def _discretise_milp_action(P_ch: float, P_dis: float,
-                              R_fcr: float, R_afrr: float, R_mfrr: float,
-                              P_max: float) -> np.ndarray:
-    """Convert one (BESS, hour) MILP solution into a 5-axis discrete action."""
-    if P_max <= 0:
-        return np.zeros(ACTION_AXES, dtype=np.int64)
-    def bin_(x: float) -> int:
-        frac = max(0.0, min(1.0, x / P_max))
-        return int(round(frac * (N_ACTION_BINS - 1)))
-    return np.array([bin_(P_ch), bin_(P_dis), bin_(R_fcr),
-                      bin_(R_afrr), bin_(R_mfrr)], dtype=np.int64)
-
-
-def _discretise_milp_action_directional(
-    P_ch: float, P_dis: float, R_fcr: float,
-    R_afrr_up: float, R_afrr_dn: float,
-    R_mfrr_up: float, R_mfrr_dn: float,
-    P_max: float,
-) -> np.ndarray:
-    """Convert one (BESS, hour) MILP directional solution to a 7-axis action.
-
-    Axes: [charge, discharge, FCR, aFRR_up, aFRR_dn, mFRR_up, mFRR_dn].
-    """
-    n_axes = 7
-    if P_max <= 0:
-        return np.zeros(n_axes, dtype=np.int64)
-    def bin_(x: float) -> int:
-        frac = max(0.0, min(1.0, x / P_max))
-        return int(round(frac * (N_ACTION_BINS - 1)))
-    return np.array([
-        bin_(P_ch), bin_(P_dis), bin_(R_fcr),
-        bin_(R_afrr_up), bin_(R_afrr_dn),
-        bin_(R_mfrr_up), bin_(R_mfrr_dn),
-    ], dtype=np.int64)
+# The MILP-to-grid projection operator now lives in action_projection, which
+# is torch-free. It is the bridge between the benchmark and every learned
+# policy, so it deserves its own name, specification and tests (Reviewer 2
+# point 7) rather than being a private helper of behavioural cloning. Keeping
+# these names re-exported so existing imports are unaffected.
+from action_projection import (_discretise_milp_action,
+                               _discretise_milp_action_directional)
 
 
 def generate_expert_demos(*args, **kwargs):

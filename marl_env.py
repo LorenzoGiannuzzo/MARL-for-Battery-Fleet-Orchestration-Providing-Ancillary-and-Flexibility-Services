@@ -62,6 +62,7 @@ from marl_milp_continuous import MultiBatteryParameters
 from flexibility_market import FlexibilityService, ServiceType
 from degradation_model import LFPBatteryState, LFPDegradationParameters
 from market_constants import SustainDurations, DEFAULT_SUSTAIN
+from fleet_coupling import FleetCoupling, project_to_connection
 
 
 # ============================================================================
@@ -120,7 +121,28 @@ def _service_type_for(key: str) -> "ServiceType":
 # Observation packing
 # ============================================================================
 
-OBS_DIM = 26  # see _build_observation for the schema
+# 26 core + commitment features, plus 3 duration-relative features (26-28).
+#
+# The three added slots exist because a shared policy cannot behave correctly
+# across assets of different storage duration when duration is only implicit
+# in the state. The sustain constraint the environment enforces is
+#
+#     R_s * tau_s <= (SOC - SOC_min) * capacity
+#
+# and dividing through by P_max turns the left side into exactly the fraction
+# the policy emits (actions are already relative to each unit's rated power)
+# and the right side into usable energy expressed in HOURS AT RATED POWER.
+# In those coordinates the constraint has the same form for every asset, so a
+# single policy can generalise across a continuum of durations instead of
+# memorising three clusters. Features 26-28 supply those quantities directly
+# rather than leaving the network to divide capacity_mwh by max_power_mw on
+# its own — a division it had no reason to learn while every unit shared an
+# energy-to-power ratio of 2 h.
+#
+# The slots are always present so that enabling and disabling the information
+# leaves the network shape and parameter count untouched: the ablation then
+# varies information content only. See configure_duration_features.
+OBS_DIM = 29  # see _build_observation for the schema
 # 21 base features + 5 pending-commitment features (one per directional service:
 # FCR, aFRR up/dn, mFRR up/dn). The 5 extra features expose how much capacity the
 # agent has ALREADY committed for delivery in the near future, per service. This
@@ -141,6 +163,75 @@ OBS_DIM = 26  # see _build_observation for the schema
 _FF_HOURS = 24
 _FF_N_SERVICES = 5  # FCR, aFRR_up, aFRR_dn, mFRR_up, mFRR_dn
 OBS_DIM_FULL_FORESIGHT = OBS_DIM + _FF_HOURS + _FF_HOURS * _FF_N_SERVICES * 3  # 26 + 384 = 410
+
+
+# ---------------------------------------------------------------------------
+# Centralised-critic global state (CTDE)
+# ---------------------------------------------------------------------------
+# Reviewer 1, point 3: the submission "does not describe a centralised critic
+# or another explicit credit-assignment mechanism, making the implementation
+# closer to parameter-shared independent PPO than to a fully evaluated
+# centralised-training and decentralised-execution architecture."
+#
+# A centralised critic needs to see what makes the JOINT value differ from the
+# sum of the individual ones. Here that is the contention for the shared grid
+# connection: with the coupling active, one unit's admissible bid depends on
+# what the others bid, and a critic that only sees its own unit cannot
+# represent that.
+#
+# APPENDED AT THE END, deliberately. Every existing index keeps its meaning,
+# the full-foresight block keeps its offsets, and the actor's slice is simply
+# "everything except the tail". Inserting in the middle would have renumbered
+# the duration features and the foresight block for no benefit.
+#
+# N-INVARIANT BY CONSTRUCTION. The obvious global state, the concatenation of
+# all agents' observations, has a dimension that depends on fleet size, so a
+# critic trained at N=50 could not be evaluated at N=100 and the scalability
+# study would need a different network per fleet size. These six summary
+# statistics describe the same contention at any N.
+GLOBAL_STATE_DIM = 6
+def mask_global_block(obs, has_block: bool):
+    """Return the observation as a DECENTRALISED policy must see it.
+
+    The global block is the fleet's state. A centralised critic reads it; an
+    actor deployed on a single unit cannot, and neither can the behavioural
+    clone, which is a decentralised policy by definition.
+
+    Getting this wrong is not loud. With the block left in, the clone trains
+    on 35 features and learns to use all of them, then its weights are
+    transferred into an actor that masks the last six: verify_transfer fell
+    from 1.000 to 0.604, meaning the warm start no longer starts where the
+    clone was. The clone also becomes a stronger baseline than it should be,
+    since it competes using information the policy it is compared against
+    does not have.
+
+    Masking rather than truncating, for the same reason as in
+    marl_centralized_critic: the width stays constant, so no network needs
+    resizing and nothing downstream has to know whether the block is there.
+
+    `has_block` must be stated, not inferred. Guessing from the width was the
+    first attempt and it is wrong: 29 and 35 are both valid observation widths
+    depending on the flag, so a 29-wide vector without a block had its last six
+    real features zeroed. The caller always knows the flag; asking for it costs
+    a keyword and removes the guess.
+    """
+    import numpy as _np
+    a = _np.asarray(obs, dtype=_np.float32)
+    if not has_block or a.shape[-1] <= GLOBAL_STATE_DIM:
+        return a
+    out = a.copy()
+    out[..., -GLOBAL_STATE_DIM:] = 0.0
+    return out
+
+
+GLOBAL_STATE_SCHEMA = (
+    "fleet_up_envelope_frac",    # committed upward power / connection limit
+    "fleet_dn_envelope_frac",    # committed downward power / connection limit
+    "fleet_mean_soc",
+    "fleet_soc_dispersion",      # std of SoC across units
+    "frac_units_energy_limited_up",
+    "frac_units_energy_limited_dn",
+)
 
 
 # ============================================================================
@@ -206,6 +297,9 @@ class MultiBESSEnv(ParallelEnv):
         directional_services: bool = False,
         capacity_lost_initial: Optional[List[float]] = None,
         sustain_hours: Optional[SustainDurations] = None,
+        duration_features: bool = True,
+        coupling: Optional[FleetCoupling] = None,
+        centralized_critic: bool = False,
     ):
         super().__init__()
         self.multi_params = multi_params
@@ -228,6 +322,19 @@ class MultiBESSEnv(ParallelEnv):
         # consumer reads self.sustain.
         self.sustain: SustainDurations = (
             sustain_hours if sustain_hours is not None else DEFAULT_SUSTAIN)
+        # Duration-relative observation features (indices 26-28). When False
+        # the three slots are written as zeros, so the observation vector keeps
+        # its shape and only the information differs.
+        self.expose_duration_features = bool(duration_features)
+        # Fleet-level coupling (shared connection capacity). Must be the SAME
+        # object the MILP was built with, or the optimizer plans against a
+        # constraint the environment does not enforce and the comparison stops
+        # being matched. See fleet_coupling.
+        self.coupling: FleetCoupling = (
+            coupling if coupling is not None else FleetCoupling.uncoupled())
+        # Last fleet-level envelope, refreshed each step. Seeds the global
+        # state block; zero before the first step of an episode.
+        self._last_fleet_envelope: Tuple[float, float] = (0.0, 0.0)
         # Number of action axes depends on directional mode:
         #  legacy 5-axis: [charge, discharge, FCR, aFRR, mFRR]
         #  directional 7-axis: [charge, discharge, FCR, aFRR_up, aFRR_dn, mFRR_up, mFRR_dn]
@@ -261,7 +368,11 @@ class MultiBESSEnv(ParallelEnv):
         # prices/services (everything the MILP sees). Read via getattr so it can
         # be set before reset() like the commitment flags; default off.
         self.full_foresight: bool = bool(getattr(self, "full_foresight", False))
+        # Centralised-critic global state, appended at the end when enabled.
+        self.centralized_critic: bool = bool(centralized_critic)
         _obs_dim = OBS_DIM_FULL_FORESIGHT if self.full_foresight else OBS_DIM
+        if self.centralized_critic:
+            _obs_dim += GLOBAL_STATE_DIM
         # Observation bounds are loose, normalised features in [-2, 2]
         self._observation_space = spaces.Box(
             low=-2.0, high=2.0, shape=(_obs_dim,), dtype=np.float32,
@@ -416,6 +527,25 @@ class MultiBESSEnv(ParallelEnv):
         self.enforce_joint_sustain = bool(enable)
         return self
 
+    def configure_coupling(self, coupling: FleetCoupling):
+        """Set the fleet-level coupling. Returns self."""
+        if not isinstance(coupling, FleetCoupling):
+            raise TypeError(
+                "coupling must be a fleet_coupling.FleetCoupling, got "
+                f"{type(coupling).__name__}")
+        self.coupling = coupling
+        return self
+
+    def configure_duration_features(self, enable: bool = True):
+        """Turn the duration-relative observation features (26-28) on or off.
+
+        Off writes zeros into the three slots instead of shrinking the vector,
+        which keeps the network architecture identical between the two arms of
+        the comparison. Returns self.
+        """
+        self.expose_duration_features = bool(enable)
+        return self
+
     def configure_sustain_hours(self, sustain_hours: SustainDurations):
         """Set the reserve sustain windows used by the bid clip, the joint
         sustain budget (FIX A) and the FIX 6 availability check.
@@ -440,11 +570,34 @@ class MultiBESSEnv(ParallelEnv):
         Diagnostic only — turns the PPO into a perfect-foresight agent.
         """
         self.full_foresight = bool(enable)
+        self._rebuild_observation_space()
+        return self
+
+    def _rebuild_observation_space(self):
+        """Recompute the observation space after a flag change.
+
+        Both flags that change the observation width go through here, so the
+        two cannot drift apart: a space rebuilt for full foresight but not for
+        the global state would silently truncate the tail.
+        """
         _obs_dim = OBS_DIM_FULL_FORESIGHT if self.full_foresight else OBS_DIM
+        if getattr(self, "centralized_critic", False):
+            _obs_dim += GLOBAL_STATE_DIM
         self._observation_space = spaces.Box(
             low=-2.0, high=2.0, shape=(_obs_dim,), dtype=np.float32,
         )
         return self
+
+    def configure_centralized_critic(self, enable: bool = True):
+        """Append the global-state block to every agent's observation.
+
+        The block is IDENTICAL across agents: it is the fleet's state, not the
+        agent's. A centralised critic reads it; a decentralised actor must not,
+        which is what marl_centralized_critic.CentralisedCriticModule enforces
+        by slicing it off before the policy head.
+        """
+        self.centralized_critic = bool(enable)
+        return self._rebuild_observation_space()
 
     def observation_space(self, agent: str) -> spaces.Space:
         return self._observation_space
@@ -1182,16 +1335,75 @@ class MultiBESSEnv(ParallelEnv):
                 'R_fcr': R_fcr, 'R_afrr': R_afrr, 'R_mfrr': R_mfrr,
                 'overcommit': overcommit_excess,
             }
+
+        # ---- FLEET PASS: shared connection envelope ----------------------
+        # Everything above is per unit and independent. This is the only step
+        # that makes one unit's admissible bid depend on what the others bid,
+        # and it is therefore what turns fifty independent problems into a
+        # coordination problem. Runs after the per-unit clip because scaling
+        # DOWN never breaks a per-unit constraint (less power needs less
+        # sustaining energy and less headroom), so the two passes compose
+        # without iterating.
+        self._last_coupling_diag = project_to_connection(
+            out, self.coupling.connection_limit_mw)
+        # Remember the fleet envelope so the global-state block can report the
+        # contention the NEXT observation is formed under.
+        from fleet_coupling import direction_envelopes as _envelopes
+        self._last_fleet_envelope = _envelopes(out)
         return out
 
     # ------------------------------------------------------------------
     # Observation builder
     # ------------------------------------------------------------------
 
+    def _global_state(self) -> np.ndarray:
+        """Fleet-level summary for the centralised critic.
+
+        Six N-invariant statistics describing the contention for the shared
+        connection and the fleet's energy posture. Identical for every agent,
+        because it is the fleet's state and not the agent's.
+
+        The envelope is normalised by the connection limit when one is set, so
+        the feature reads directly as "how much of the shared cable is already
+        spoken for". Without a coupling there is no contention to report and
+        the total rated power is used instead, which keeps the feature bounded
+        and meaningful rather than undefined.
+        """
+        g = np.zeros(GLOBAL_STATE_DIM, dtype=np.float32)
+        n = max(self.n_agents, 1)
+
+        limit = self.coupling.connection_limit_mw
+        if limit is None or limit <= 0.0:
+            limit = max(sum(b.max_power_mw
+                            for b in self.multi_params.batteries), 1e-9)
+        up, dn = self._last_fleet_envelope
+        g[0] = min(up / limit, 2.0)
+        g[1] = min(dn / limit, 2.0)
+
+        socs = np.asarray(self._socs[:n], dtype=np.float64)
+        g[2] = float(socs.mean())
+        g[3] = float(socs.std())
+
+        # A unit counts as energy-limited in a direction when the energy it can
+        # still move is less than one hour at rated power: it is then the
+        # binding side of the fleet's ability to serve an activation.
+        lim_up = lim_dn = 0
+        for i in range(n):
+            bp = self.multi_params.batteries[i]
+            hours_up = (socs[i] - self.soc_min) * bp.capacity_mwh / max(
+                bp.max_power_mw, 1e-9)
+            hours_dn = (self.soc_max - socs[i]) * bp.capacity_mwh / max(
+                bp.max_power_mw, 1e-9)
+            lim_up += 1 if hours_up < 1.0 else 0
+            lim_dn += 1 if hours_dn < 1.0 else 0
+        g[4] = lim_up / n
+        g[5] = lim_dn / n
+        return g
+
     def _build_observation(self, agent: str) -> np.ndarray:
         """Per-agent observation.
 
-        Schema (21 features):
+        Schema (core block; see OBS_DIM for the duration features at 26-28):
           0:  own SOC (in [0, 1])
           1:  own FCE_cumulative normalised by 8000 (capped at 2.0)
           2:  own capacity_mwh / 5.0  (utility=1.0 reference)
@@ -1213,10 +1425,13 @@ class MultiBESSEnv(ParallelEnv):
         bp = self.multi_params.batteries[i]
         t = min(self._hour, self.episode_hours - 1)
 
-        obs = np.zeros(
-            OBS_DIM_FULL_FORESIGHT if self.full_foresight else OBS_DIM,
-            dtype=np.float32,
-        )
+        # Allocate from the DECLARED observation space, not from a locally
+        # recomputed width. Recomputing it here once cost the global-state
+        # block six slots it did not own: writing obs[-6:] into a vector sized
+        # without the block silently overwrote the duration features instead
+        # of appending. One source of truth for the width, and the two cannot
+        # disagree.
+        obs = np.zeros(self._observation_space.shape[0], dtype=np.float32)
         obs[0] = self._socs[i]
         obs[1] = min(self._lfp_states[i].fce_cumulative / 8000.0, 2.0)
         obs[2] = bp.capacity_mwh / 5.0
@@ -1264,7 +1479,31 @@ class MultiBESSEnv(ParallelEnv):
             for j, k in enumerate(_ORDERED_SERVICE_KEYS):
                 obs[21 + j] = min(pend[k] / pmax, 2.0)
 
-        # ---- 26+: full-foresight features (diagnostic) ----
+        # ---- 26-28: duration-relative state (asset-invariant coordinates) --
+        # 26: usable discharge energy, in hours at rated power
+        # 27: charge headroom, in hours at rated power (efficiency-adjusted)
+        # 28: the unit's storage duration, capacity / P_max, in hours
+        #
+        # These are the quantities the sustain constraints are written in once
+        # both sides are divided by P_max, so they make the offerable fraction
+        # of rated power directly readable from the state for ANY asset. Two
+        # units with the same duration become the same decision problem; two
+        # with different durations differ in one scalar the policy receives
+        # explicitly and can condition on continuously, including durations
+        # never seen in training.
+        #
+        # Normalised by a 4 h reference and clipped at 2.0, matching the
+        # treatment of the other ratio features.
+        if self.expose_duration_features:
+            _pmax = max(bp.max_power_mw, 1e-9)
+            _dur = bp.capacity_mwh / _pmax
+            _eff = max(getattr(bp, "efficiency", 1.0), 1e-9)
+            obs[26] = min((self._socs[i] - bp.soc_min) * _dur / 4.0, 2.0)
+            obs[27] = min((bp.soc_max - self._socs[i]) * _dur / (4.0 * _eff),
+                          2.0)
+            obs[28] = min(_dur / 4.0, 2.0)
+
+        # ---- 29+: full-foresight features (diagnostic) ----
         # Give the agent EVERYTHING the MILP sees: the true PUN price and the
         # true service (cap_price, energy_price, award_prob) for ALL 24 hours,
         # using the same normalisation as the per-hour features above. Layout:
@@ -1275,6 +1514,9 @@ class MultiBESSEnv(ParallelEnv):
         # This makes the PPO a perfect-foresight agent like the MILP, isolating
         # "how close does the DRL get at equal information?" from the information
         # gap. Diagnostic only — not deployable.
+        if self.centralized_critic:
+            obs[-GLOBAL_STATE_DIM:] = self._global_state()
+
         if self.full_foresight:
             o = OBS_DIM  # start index
             H = self.episode_hours

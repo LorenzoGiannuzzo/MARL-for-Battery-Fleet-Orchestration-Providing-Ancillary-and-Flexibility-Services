@@ -52,7 +52,7 @@ from typing import Optional, Dict, Any
 
 import numpy as np
 
-from marl_trainer import (
+from marl_trainer import (CLUSTER_POLICY_IDS, cluster_sizes_from_fleet,
     build_default_config, train_loop, register_multi_bess_env,
     SHARED_POLICY_ID,
 )
@@ -130,6 +130,13 @@ def train_ppo_policy(
     overcommit_penalty: float = 0.0,
     expected_reward_training: bool = False,
     sustain=None,
+    # One policy per asset cluster instead of one shared across all units.
+    # The clone is transferred into every policy, so the only difference from
+    # the shared-policy run is whether the three clusters share weights.
+    per_cluster_policies: bool = False,
+    duration_features: bool = True,
+    coupling=None,
+    centralized_critic: bool = False,
 ):
     """Allena una shared-policy PPO sul MultiBESSEnv e restituisce l'algo RLlib."""
     # NOTE on Ray init: we deliberately do NOT call ray.init() here. Earlier runs
@@ -177,7 +184,24 @@ def train_ppo_policy(
         market_window_key=window_key,
         carry_soc_across_episodes=carry_soc_across_episodes,
         sustain_hours=sustain,
+        per_cluster_sizes=(cluster_sizes_from_fleet(fleet)
+                           if per_cluster_policies else None),
+        duration_features=duration_features,
+        coupling=coupling,
+        centralized_critic=centralized_critic,
     )
+
+    # Which policies this run actually trains. Everything downstream (the BC
+    # transfer, the KL anchor, the training metrics, the evaluation) iterates
+    # over this list, so the single- and multi-policy paths stay one code
+    # path rather than two that can drift apart.
+    trained_policy_ids = (list(CLUSTER_POLICY_IDS) if per_cluster_policies
+                          else [SHARED_POLICY_ID])
+    if verbose and per_cluster_policies:
+        _cs = cluster_sizes_from_fleet(fleet)
+        print(f"  [ppo] PER-CLUSTER POLICIES: {len(trained_policy_ids)} "
+              f"policies for clusters of size {_cs} "
+              f"(parameter sharing DISABLED across clusters)")
 
     is_warm = bc_net is not None
     # Which warm-start factors are actually active in THIS run. Logged so
@@ -216,7 +240,7 @@ def train_ppo_policy(
             from marl_bc_kl_anchor import make_kl_anchored_config
             cfg = make_kl_anchored_config(
                 cfg, bc_net,
-                policy_id=SHARED_POLICY_ID,
+                policy_id=trained_policy_ids,
                 beta_start=bc_kl_beta_start,
                 anneal_iters=bc_kl_anneal_iters,
                 beta_floor=bc_kl_beta_floor,
@@ -236,10 +260,16 @@ def train_ppo_policy(
     algo = cfg.build_algo()  # RLlib 2.55: build_algo() (build() is deprecated)
 
     if is_warm:
-        info = transfer_bc_weights_to_algo(bc_net, algo, SHARED_POLICY_ID)
-        if verbose:
-            print(f"  [ppo] BC->actor transfer: {info['transferred']} tensori "
-                  f"({len(info['skipped'])} saltati)")
+        # Transfer the SAME clone into every trained policy. With per-cluster
+        # policies this is what makes the comparison controlled: all three
+        # start from identical weights, so a difference in the result is
+        # attributable to the sharing and not to the initialisation.
+        for _pid in trained_policy_ids:
+            info = transfer_bc_weights_to_algo(bc_net, algo, _pid)
+            if verbose:
+                print(f"  [ppo] BC->actor transfer [{_pid}]: "
+                      f"{info['transferred']} tensori "
+                      f"({len(info['skipped'])} saltati)")
         # sanity check: la policy PPO appena trasferita deve riprodurre il BC
         try:
             # Use the BC net's OWN input dimension, not the module constant
@@ -250,9 +280,10 @@ def train_ppo_policy(
             from marl_env import OBS_DIM
             probe_dim = int(getattr(bc_net, "obs_dim", OBS_DIM))
             obs_samples = np.random.uniform(-1, 1, size=(256, probe_dim)).astype(np.float32)
-            vt = verify_transfer(bc_net, algo, SHARED_POLICY_ID, obs_samples)
-            if verbose:
-                print(f"  [ppo] verify_transfer: {vt}")
+            for _pid in trained_policy_ids:
+                vt = verify_transfer(bc_net, algo, _pid, obs_samples)
+                if verbose:
+                    print(f"  [ppo] verify_transfer [{_pid}]: {vt}")
         except Exception as exc:
             if verbose:
                 print(f"  [ppo] verify_transfer skipped: {exc}")
@@ -264,7 +295,8 @@ def train_ppo_policy(
     try:
         from marl_ppo_convergence import train_loop_rich
         metrics = train_loop_rich(algo, n_iterations=n_iterations,
-                                  policy_id=SHARED_POLICY_ID, verbose=verbose)
+                                  policy_id=trained_policy_ids[0],
+                                  verbose=verbose)
     except Exception as exc:
         # Fallback al train_loop classico se ppo_convergence non è disponibile
         if verbose:
@@ -384,15 +416,43 @@ def make_rllib_policy_fn(algo, policy_id: str = SHARED_POLICY_ID,
     di BC e random (apples-to-apples).
 
     rng: se passato e deterministic=False, il sampling stocastico usa questo
-    Generator invece dello stato globale np.random, per riproducibilità."""
-    module = algo.get_module(policy_id)
+    Generator invece dello stato globale np.random, per riproducibilità.
+
+    policy_id may be a single id or the three cluster ids. In the per-cluster
+    case the right module has to be picked per unit, but evaluate_policy_multi_day
+    calls policy_fn(obs) without saying which agent it is asking for. The
+    observation already identifies the unit: feature 3 is max_power_mw / 2.5,
+    which is 0.2, 0.4 and 1.0 for the commercial, industrial and utility
+    ratings. Routing on it reproduces MultiBatteryParameters.cluster_of
+    (thresholds 0.75 and 1.75 MW, i.e. 0.3 and 0.7 once normalised) without
+    changing the evaluation signature, and it stays correct when the clusters
+    are given different durations because power, not capacity, is what is
+    held fixed."""
     import torch
     from marl_env import N_ACTION_BINS, ACTION_AXES, ACTION_AXES_DIRECTIONAL
     n_axes = ACTION_AXES_DIRECTIONAL if directional_services else ACTION_AXES
     _choice = rng.choice if rng is not None else np.random.choice
 
+    _ids = [policy_id] if isinstance(policy_id, str) else list(policy_id)
+    _modules = [algo.get_module(pid) for pid in _ids]
+    _POWER_FEATURE = 3          # max_power_mw / 2.5, see marl_env schema
+    _COMMERCIAL_MAX = 0.3       # 0.75 MW / 2.5
+    _INDUSTRIAL_MAX = 0.7       # 1.75 MW / 2.5
+
+    def _module_for(obs_arr: np.ndarray):
+        if len(_modules) == 1:
+            return _modules[0]
+        p = float(obs_arr[_POWER_FEATURE])
+        if p <= _COMMERCIAL_MAX:
+            return _modules[0]
+        if p <= _INDUSTRIAL_MAX:
+            return _modules[1]
+        return _modules[2]
+
     def policy(obs: np.ndarray) -> np.ndarray:
-        t = torch.as_tensor(np.asarray(obs, dtype=np.float32)).unsqueeze(0)
+        obs_arr = np.asarray(obs, dtype=np.float32)
+        module = _module_for(obs_arr)
+        t = torch.as_tensor(obs_arr).unsqueeze(0)
         out = module.forward_inference({"obs": t})
         logits = out["action_dist_inputs"]                  # (1, n_axes*11)
         logits = logits.detach().cpu().numpy().reshape(-1)

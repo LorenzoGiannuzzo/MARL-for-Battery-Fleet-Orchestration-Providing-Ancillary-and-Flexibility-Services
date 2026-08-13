@@ -223,6 +223,59 @@ def _resolve_sustain(env_config: Dict[str, Any]):
                     f"got {type(raw).__name__}")
 
 
+def _centralised_rl_module_kwargs(n_batteries, episode_hours,
+                                  directional_services, fcnet_hiddens,
+                                  policy_ids):
+    """RLModuleSpec kwargs for the centralised critic.
+
+    Built here rather than at import so that a run without the flag never
+    touches marl_centralized_critic, and a failure to construct the spec is
+    loud at configuration time instead of silently degrading to independent
+    PPO halfway through training.
+    """
+    from marl_env import MultiBESSEnv, GLOBAL_STATE_DIM
+    from marl_centralized_critic import centralised_multi_rl_module_spec
+    from marl_milp_continuous import MultiBatteryParameters
+    from milp_optimizer import BatteryParameters
+
+    probe_fleet = MultiBatteryParameters([
+        BatteryParameters(capacity_mwh=2.0, max_power_mw=1.0,
+                          degradation_cost_per_mwh=25000.0, cycle_life=8000)
+    ] * max(1, int(n_batteries)))
+    probe = MultiBESSEnv(
+        probe_fleet, episode_hours=episode_hours,
+        directional_services=directional_services, centralized_critic=True)
+    spec = centralised_multi_rl_module_spec(
+        policy_ids,
+        probe.observation_space("bess_0"), probe.action_space("bess_0"),
+        model_config={"fcnet_hiddens": list(fcnet_hiddens),
+                      "fcnet_activation": "tanh"},
+        global_state_dim=GLOBAL_STATE_DIM)
+    return {"rl_module_spec": spec}
+
+
+def _resolve_coupling(env_config: Dict[str, Any]):
+    """Pull the FleetCoupling out of env_config.
+
+    Accepts a FleetCoupling or a plain dict. The dict form matters for the
+    same reason as the sustain windows: RLlib serialises env_config on its way
+    to a worker, and a plain dict survives that round trip more predictably
+    than a frozen dataclass.
+    """
+    from fleet_coupling import FleetCoupling
+    raw = env_config.get("coupling", None)
+    if raw is None:
+        return FleetCoupling.uncoupled()
+    if isinstance(raw, FleetCoupling):
+        return raw
+    if isinstance(raw, dict):
+        return FleetCoupling(
+            connection_limit_mw=raw.get("connection_limit_mw"),
+            label=str(raw.get("label", "from_env_config")))
+    raise TypeError(f"coupling must be FleetCoupling or dict, "
+                    f"got {type(raw).__name__}")
+
+
 def _env_creator(env_config: Dict[str, Any]):
     """Ray Tune-compatible env creator. Receives a config dict and returns
     a Ray-wrapped multi-agent env.
@@ -282,6 +335,9 @@ def _env_creator(env_config: Dict[str, Any]):
         seed=seed,
         directional_services=directional,
         sustain_hours=_resolve_sustain(env_config),
+        duration_features=bool(env_config.get("duration_features", True)),
+        coupling=_resolve_coupling(env_config),
+        centralized_critic=bool(env_config.get("centralized_critic", False)),
     )
     if market_window is not None:
         # Offset the day-sampler seed off the env seed so the day sequence is
@@ -343,6 +399,70 @@ def _shared_policy_mapping(agent_id: str, *args, **kwargs) -> str:
     return SHARED_POLICY_ID
 
 
+# ---------------------------------------------------------------------------
+# Per-cluster policies
+# ---------------------------------------------------------------------------
+# One policy per asset cluster instead of one shared across all N units.
+#
+# WHY THIS EXISTS. The heterogeneous-duration run showed the gap to the
+# behavioural clone DOUBLE (-621k -> -1,244k EUR) once the three clusters
+# stopped sharing an energy-to-power ratio, with the agent's arbitrage
+# revenue collapsing by 62% while the clone held its ground. The observation
+# already carries capacity and power, so the agent is not blind to unit type;
+# what changed is that a single set of weights must now produce correct
+# behaviour for a 4 h, a 2 h and a 1 h asset at once.
+#
+# Giving each cluster its own policy isolates that: everything else stays
+# identical, including the initialisation (the same clone is transferred into
+# all three), so any recovery of the gap is attributable to parameter sharing
+# and nothing else. This is the experiment Reviewers 1 (pt 3), 2 (pt 5) and
+# 3 (pt 4) asked for on the multi-agent formulation.
+CLUSTER_POLICY_IDS = (
+    "policy_commercial",
+    "policy_industrial",
+    "policy_utility",
+)
+
+
+def make_cluster_policy_mapping(n_commercial: int, n_industrial: int):
+    """Build a policy_mapping_fn that routes agents to their cluster policy.
+
+    Agent ids are ``bess_{i}`` and heterogeneous_fleet emits the clusters in
+    order (commercial, then industrial, then utility), so the index ranges
+    identify the cluster. Returned as a closure because RLlib cloudpickles
+    the mapping function on its way to the workers, which captures the two
+    boundaries with it; a module-level dict populated on the driver would not
+    survive that trip.
+    """
+    n_c = int(n_commercial)
+    n_i = int(n_industrial)
+
+    def _map(agent_id, *args, **kwargs) -> str:
+        try:
+            idx = int(str(agent_id).rsplit("_", 1)[-1])
+        except (ValueError, IndexError):
+            return CLUSTER_POLICY_IDS[0]
+        if idx < n_c:
+            return CLUSTER_POLICY_IDS[0]
+        if idx < n_c + n_i:
+            return CLUSTER_POLICY_IDS[1]
+        return CLUSTER_POLICY_IDS[2]
+
+    return _map
+
+
+def cluster_sizes_from_fleet(fleet) -> Tuple[int, int, int]:
+    """Count units per cluster using the fleet's own classifier.
+
+    Reads MultiBatteryParameters.cluster_of, which classifies on power and is
+    therefore stable when the clusters are given different durations.
+    """
+    counts = {"commercial": 0, "industrial": 0, "utility": 0}
+    for i in range(fleet.n_batteries):
+        counts[fleet.cluster_of(i)] += 1
+    return counts["commercial"], counts["industrial"], counts["utility"]
+
+
 def build_default_config(
     n_batteries: int = 5,
     episode_hours: int = 24,
@@ -376,6 +496,20 @@ def build_default_config(
     # None -> market_constants.DEFAULT_SUSTAIN. Serialised as a plain dict
     # into env_config so it survives RLlib's trip to a worker process.
     sustain_hours=None,
+    # One policy per cluster instead of one shared across all units. Pass the
+    # (commercial, industrial, utility) counts; None keeps parameter sharing.
+    per_cluster_sizes: Optional[Tuple[int, int, int]] = None,
+    # Duration-relative observation features (marl_env indices 26-28). The
+    # slots exist either way; False writes zeros so the two arms share an
+    # identical network shape.
+    duration_features: bool = True,
+    # Shared connection limit. The TRAINING environment needs it too: an agent
+    # trained without the constraint and evaluated with it is not being
+    # measured on the problem it learned.
+    coupling=None,
+    # Append the fleet-level global state to every observation and give the
+    # value head a module that reads it while the policy head does not.
+    centralized_critic: bool = False,
     market_window_key: Optional[str] = None,
     carry_soc_across_episodes: bool = True,
 ) -> PPOConfig:
@@ -417,6 +551,11 @@ def build_default_config(
         # Reserve sustain windows (market_constants.SustainDurations),
         # flattened to a dict for worker serialisation. _resolve_sustain()
         # rebuilds the dataclass inside the env creator.
+        duration_features=bool(duration_features),
+        centralized_critic=bool(centralized_critic),
+        coupling=(None if coupling is None
+                  else {"connection_limit_mw": coupling.connection_limit_mw,
+                        "label": coupling.label}),
         sustain_hours=(
             None if sustain_hours is None
             else (sustain_hours if isinstance(sustain_hours, dict)
@@ -434,11 +573,20 @@ def build_default_config(
         PPOConfig()
         .environment(env=ENV_NAME, env_config=env_config)
         .framework("torch")
-        .multi_agent(
-            policies={SHARED_POLICY_ID},
-            policy_mapping_fn=_shared_policy_mapping,
-            policies_to_train=[SHARED_POLICY_ID],
-        )
+        .multi_agent(**(
+            {
+                "policies": set(CLUSTER_POLICY_IDS),
+                "policy_mapping_fn": make_cluster_policy_mapping(
+                    per_cluster_sizes[0], per_cluster_sizes[1]),
+                "policies_to_train": list(CLUSTER_POLICY_IDS),
+            }
+            if per_cluster_sizes is not None else
+            {
+                "policies": {SHARED_POLICY_ID},
+                "policy_mapping_fn": _shared_policy_mapping,
+                "policies_to_train": [SHARED_POLICY_ID],
+            }
+        ))
         .training(
             lr=lr,
             train_batch_size=train_batch_size,
@@ -450,6 +598,14 @@ def build_default_config(
             entropy_coeff=entropy_coeff,
         )
         .rl_module(
+            **(_centralised_rl_module_kwargs(
+                   n_batteries, episode_hours, directional_services,
+                   fcnet_hiddens,
+                   # Every policy the run TRAINS needs its own module, or the
+                   # ones left out would quietly keep a decentralised critic.
+                   (list(CLUSTER_POLICY_IDS) if per_cluster_sizes is not None
+                    else [SHARED_POLICY_ID]))
+               if centralized_critic else {}),
             model_config={
                 "fcnet_hiddens": list(fcnet_hiddens),
                 "fcnet_activation": "tanh",

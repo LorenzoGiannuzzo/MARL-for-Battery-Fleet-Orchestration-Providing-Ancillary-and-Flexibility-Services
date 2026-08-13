@@ -53,6 +53,8 @@ from italian_market_data import (MarketWindow, make_synthetic_market_window,
                                    PUN2024Calibration, ServiceCalibration)
 from degradation_model import LFPBatteryState
 from market_constants import SustainDurations, DEFAULT_SUSTAIN
+from fleet_coupling import FleetCoupling
+from marl_env import mask_global_block
 
 warnings.simplefilter("ignore")
 
@@ -105,6 +107,15 @@ def generate_multi_day_expert_demos(
     overcommit_penalty: float = 0.0,
     milp_mode: str = "continuous",
     sustain: SustainDurations = DEFAULT_SUSTAIN,
+    duration_features: bool = True,
+    coupling: FleetCoupling = FleetCoupling.uncoupled(),
+    # Kept on ONE observation width across every stage of the pipeline. The
+    # demo generator and the clone do not use a critic, but if their
+    # observation were narrower than the PPO's, the two would be trained and
+    # evaluated on different vectors and every downstream comparison would be
+    # measuring the mismatch. The clone simply ignores the tail, at the cost
+    # of six input weights.
+    centralized_critic: bool = False,
 ) -> MultiDayDemoResult:
     """Day-by-day MILP demo generation with rolling per-BESS state.
 
@@ -240,6 +251,7 @@ def generate_multi_day_expert_demos(
                 fce_cumulative_initial=fce,
                 directional_services=directional_services,
                 **sustain.as_milp_kwargs(),
+                coupling=coupling,
                 enable_commitments=enable_commitments,
                 penalty_k=penalty_k,
                 n_action_bins=N_ACTION_BINS,
@@ -253,6 +265,7 @@ def generate_multi_day_expert_demos(
                 fce_cumulative_initial=fce,
                 directional_services=directional_services,
                 **sustain.as_milp_kwargs(),
+                coupling=coupling,
                 enable_commitments=enable_commitments,
                 penalty_k=penalty_k,
             )
@@ -293,6 +306,9 @@ def generate_multi_day_expert_demos(
                 seed=env_seed + day,
                 directional_services=directional_services,
                 sustain_hours=sustain,
+                duration_features=duration_features,
+                centralized_critic=centralized_critic,
+                coupling=coupling,
             )
             if enable_commitments:
                 env.configure_commitments(True, commitment_lead_time, penalty_k)
@@ -331,7 +347,7 @@ def generate_multi_day_expert_demos(
         # so bin_(x) = round((x/P_max)*39) recovers the same bin and this step
         # is the IDENTITY: no information is lost, no extra handicap is applied.
         action_sequence: List[Dict[str, np.ndarray]] = []
-        from marl_bc import _discretise_milp_action_directional
+        from action_projection import _discretise_milp_action_directional
         for t in range(24):
             actions_t = {}
             for i in range(N):
@@ -369,6 +385,9 @@ def generate_multi_day_expert_demos(
             seed=env_seed + day,
             directional_services=directional_services,
             sustain_hours=sustain,
+            duration_features=duration_features,
+            centralized_critic=centralized_critic,
+            coupling=coupling,
         )
         if enable_commitments:
             env.configure_commitments(True, commitment_lead_time, penalty_k)
@@ -437,7 +456,14 @@ def generate_multi_day_expert_demos(
                 traj_soc_max.append(float(socs_arr.max()))
 
             for agent_id in obs:
-                all_obs.append(obs[agent_id].copy())
+                # Record the ACTOR's view. The clone is a decentralised
+                # policy: it must not learn from the fleet-level block that a
+                # deployed unit cannot see, and the PPO actor it warm-starts
+                # masks that block anyway. Training the clone on the full
+                # vector dropped verify_transfer from 1.000 to 0.604, meaning
+                # the warm start no longer began where the clone was.
+                all_obs.append(
+                    mask_global_block(obs[agent_id], centralized_critic))
                 all_actions.append(actions_t[agent_id].copy())
             obs, rewards, _, _, infos = env.step(actions_t)
             day_env_profit += sum(rewards.values())
@@ -580,6 +606,9 @@ def evaluate_policy_multi_day(
     full_foresight: bool = False,
     overcommit_penalty: float = 0.0,
     sustain: SustainDurations = DEFAULT_SUSTAIN,
+    duration_features: bool = True,
+    coupling: FleetCoupling = FleetCoupling.uncoupled(),
+    centralized_critic: bool = False,
 ) -> MultiDayEvalResult:
     """Evaluate a policy across multiple days with rolling state.
 
@@ -665,6 +694,9 @@ def evaluate_policy_multi_day(
             seed=env_seed + day,
             directional_services=directional_services,
             sustain_hours=sustain,
+            duration_features=duration_features,
+            centralized_critic=centralized_critic,
+            coupling=coupling,
         )
         if enable_commitments:
             env.configure_commitments(True, commitment_lead_time, penalty_k)
@@ -835,9 +867,17 @@ def evaluate_policy_multi_day(
 # Convenience policy adapters
 # ============================================================================
 
-def make_bc_policy_fn(bc_net: BCPolicyNet, deterministic: bool = True):
+def make_bc_policy_fn(bc_net: BCPolicyNet, deterministic: bool = True,
+                      centralized_critic: bool = False):
+    """The clone acting as a decentralised policy.
+
+    `centralized_critic` must match the environment the clone is evaluated in:
+    the observation carries the fleet block only when it is on, and the clone
+    was trained without it either way.
+    """
     def policy(obs):
-        return bc_net.predict(obs, deterministic=deterministic)
+        return bc_net.predict(mask_global_block(obs, centralized_critic),
+                              deterministic=deterministic)
     return policy
 
 
@@ -974,8 +1014,28 @@ def run_full_pipeline(
     # them one at a time.
     sustain: SustainDurations = DEFAULT_SUSTAIN,
     use_kl_anchor: bool = True,
+    # One PPO policy per asset cluster instead of one shared across all
+    # units. Tests whether parameter sharing is what breaks when the clusters
+    # have genuinely different storage durations.
+    per_cluster_policies: bool = False,
+    # Duration-relative observation features (marl_env 26-28): usable energy,
+    # headroom and duration expressed in hours at rated power, the coordinates
+    # in which the sustain constraint is asset-invariant.
+    duration_features: bool = True,
     warmstart_lr_scale: float = 0.1,
     warmstart_entropy_coeff: Optional[float] = 0.0,
+    # Shared grid connection limit: the only constraint that couples the units
+    # to each other, and therefore the only thing that turns N independent
+    # problems into a coordination problem. Reaches BOTH the MILP and the
+    # environment, or the benchmark would plan against a constraint the policy
+    # is never evaluated under.
+    coupling: FleetCoupling = FleetCoupling.uncoupled(),
+    # Centralised critic: appends the fleet-level global state to every
+    # observation and gives the value head a module that reads it while the
+    # policy head does not (CTDE). Only meaningful together with a coupling:
+    # with independent units the joint value is the sum of the individual
+    # ones and a global critic has nothing extra to learn.
+    centralized_critic: bool = False,
 ) -> FullPipelineResult:
     """End-to-end pipeline: data -> MILP demos -> BC training -> evaluation.
 
@@ -1016,6 +1076,15 @@ def run_full_pipeline(
         ppo_seed = eval_seed
         set_global_seeds(data_seed)
 
+    print(f"[pipeline] fleet coupling: {coupling.describe()}")
+    print(f"[pipeline] centralised critic: "
+          f"{'ON (CTDE)' if centralized_critic else 'OFF'}")
+    if centralized_critic and not coupling.is_active:
+        print("  [pipeline] NOTE: a centralised critic without a coupling has "
+              "nothing extra to learn; the joint value is the sum of the "
+              "individual ones. Pair it with --connection-limit.")
+    print(f"[pipeline] duration-relative obs features (26-28): "
+          f"{'ON' if duration_features else 'OFF (zeroed)'}")
     print(f"[pipeline] sustain windows: {sustain.describe()}")
     if not sustain.is_sogl_compliant():
         print("  [pipeline] WARNING: tau_FCR is outside the SO GL Art. 156(10) "
@@ -1085,6 +1154,9 @@ def run_full_pipeline(
             overcommit_penalty=overcommit_penalty,
             milp_mode=milp_mode,
             sustain=sustain,
+            duration_features=duration_features,
+            coupling=coupling,
+            centralized_critic=centralized_critic,
     )
     print(f"  demos: {train_demo.obs.shape[0]} samples, "
           f"total train MILP profit: {train_demo.total_milp_profit:.2f} EUR, "
@@ -1142,13 +1214,17 @@ def run_full_pipeline(
             overcommit_penalty=overcommit_penalty,
             milp_mode=milp_mode,
             sustain=sustain,
+            duration_features=duration_features,
+            coupling=coupling,
+            centralized_critic=centralized_critic,
     )
 
     # BC policy on the test window
     print(f"[pipeline] BC policy on test window...")
     bc_eval = evaluate_policy_multi_day(
         fleet, test_window,
-        policy_fn=make_bc_policy_fn(bc_net, deterministic=True),
+        policy_fn=make_bc_policy_fn(bc_net, deterministic=True,
+                                    centralized_critic=centralized_critic),
         progress_label="BC",
         use_nonlinear_degradation=use_nonlinear_degradation,
         initial_soc=test_initial_soc,
@@ -1162,6 +1238,10 @@ def run_full_pipeline(
         penalty_k=penalty_k,
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
+        centralized_critic=centralized_critic,
+        coupling=coupling,
+        duration_features=duration_features,
+        sustain=sustain,
     )
 
     # Random baseline on the test window
@@ -1182,6 +1262,10 @@ def run_full_pipeline(
         penalty_k=penalty_k,
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
+        centralized_critic=centralized_critic,
+        coupling=coupling,
+        duration_features=duration_features,
+        sustain=sustain,
     )
 
     # ---- PPO comparison (Step 6 algorithm) ----
@@ -1192,6 +1276,7 @@ def run_full_pipeline(
     ppo_stochastic: Dict[str, float] = {}
     ppo_training_metrics: Dict[str, list] = {}
     if run_ppo_vanilla or run_ppo_bc_warmstart:
+        from marl_trainer import CLUSTER_POLICY_IDS, SHARED_POLICY_ID
         from marl_ppo_comparison import (train_ppo_policy,
                                          make_rllib_policy_fn,
                                          diagnose_zero_policy)
@@ -1209,6 +1294,9 @@ def run_full_pipeline(
             overcommit_penalty=overcommit_penalty,
             expected_reward_training=expected_reward_training,
             sustain=sustain,
+            duration_features=duration_features,
+            coupling=coupling,
+            centralized_critic=centralized_critic,
         )
         ppo_training_metrics["ppo_vanilla"] = [
             float(m.get("episode_reward_mean", 0.0) or 0.0)
@@ -1232,6 +1320,9 @@ def run_full_pipeline(
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
             sustain=sustain,
+            duration_features=duration_features,
+            coupling=coupling,
+            centralized_critic=centralized_critic,
         )
         ppo_results["ppo_vanilla"] = ppo_v_eval
         try:
@@ -1250,6 +1341,8 @@ def run_full_pipeline(
             use_kl_anchor=use_kl_anchor,
             warmstart_lr_scale=warmstart_lr_scale,
             warmstart_entropy_coeff=warmstart_entropy_coeff,
+            per_cluster_policies=per_cluster_policies,
+            centralized_critic=centralized_critic,
             market_window=train_window,
             use_nonlinear_degradation=use_nonlinear_degradation, seed=ppo_seed,
             directional_services=directional_services,
@@ -1260,6 +1353,8 @@ def run_full_pipeline(
             overcommit_penalty=overcommit_penalty,
             expected_reward_training=expected_reward_training,
             sustain=sustain,
+            duration_features=duration_features,
+            coupling=coupling,
         )
         ppo_training_metrics["ppo_bc"] = [
             float(m.get("episode_reward_mean", 0.0) or 0.0)
@@ -1268,7 +1363,10 @@ def run_full_pipeline(
         print(f"[pipeline] PPO BC-warmstart on test window...")
         ppo_w_eval = evaluate_policy_multi_day(
             fleet, test_window,
-            policy_fn=make_rllib_policy_fn(algo_w, directional_services=directional_services),
+            policy_fn=make_rllib_policy_fn(
+                algo_w, directional_services=directional_services,
+                policy_id=(list(CLUSTER_POLICY_IDS) if per_cluster_policies
+                           else SHARED_POLICY_ID)),
             progress_label="PPO BC-warm",
             use_nonlinear_degradation=use_nonlinear_degradation,
             initial_soc=test_initial_soc,
@@ -1283,6 +1381,9 @@ def run_full_pipeline(
             full_foresight=full_foresight,
             overcommit_penalty=overcommit_penalty,
             sustain=sustain,
+            duration_features=duration_features,
+            coupling=coupling,
+            centralized_critic=centralized_critic,
         )
         # Evaluate the SAME policy both ways, always. Evaluation takes the
         # per-axis argmax while training samples from the distribution, and
@@ -1298,7 +1399,9 @@ def run_full_pipeline(
                 fleet, test_window,
                 policy_fn=make_rllib_policy_fn(
                     algo_w, directional_services=directional_services,
-                    deterministic=False),
+                    deterministic=False,
+                    policy_id=(list(CLUSTER_POLICY_IDS) if per_cluster_policies
+                               else SHARED_POLICY_ID)),
                 progress_label="PPO BC-warm (stochastic)",
                 use_nonlinear_degradation=use_nonlinear_degradation,
                 initial_soc=test_initial_soc,
@@ -1313,6 +1416,9 @@ def run_full_pipeline(
                 full_foresight=full_foresight,
                 overcommit_penalty=overcommit_penalty,
                 sustain=sustain,
+                duration_features=duration_features,
+                coupling=coupling,
+                centralized_critic=centralized_critic,
             )
             ppo_stochastic["ppo_bc"] = float(_stoch.total_profit_eur)
             print(f"[eval] ppo_bc  argmax {ppo_w_eval.total_profit_eur:,.2f} EUR"

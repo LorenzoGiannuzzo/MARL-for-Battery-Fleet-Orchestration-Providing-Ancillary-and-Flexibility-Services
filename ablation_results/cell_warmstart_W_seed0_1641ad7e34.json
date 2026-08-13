@@ -1,0 +1,68 @@
+{
+  "config_key": "W",
+  "config_label": "PPO warm start (full)",
+  "seed": 0,
+  "sustain_label": "sogl_default",
+  "tau_fcr": 0.25,
+  "durations": [
+    1.0,
+    2.0,
+    4.0
+  ],
+  "per_cluster_policies": false,
+  "duration_features": true,
+  "connection_limit_mw": 2.4,
+  "config_fingerprint": "1641ad7e34",
+  "config_summary": {
+    "tag": "warmstart",
+    "n_units": 3,
+    "durations": [
+      1.0,
+      2.0,
+      4.0
+    ],
+    "total_mw": 4.0,
+    "train_start": "2023-01-01 00:00:00",
+    "train_days": 10,
+    "test_days": 5,
+    "ppo_iterations": 2,
+    "sustain": {
+      "fcr": 0.25,
+      "afrr": 1.0,
+      "mfrr": 2.0
+    },
+    "connection_limit_mw": 2.4,
+    "centralized_critic": true,
+    "duration_features": true,
+    "per_cluster_policies": false,
+    "price_column": "PUN",
+    "pun": [
+      "20230101_20231231_PUN.xlsx",
+      "20240101_20241231_PUN.xlsx"
+    ],
+    "msd": [
+      "EsitiMSD_PrezziExAnte_20230101_20230401_Nord.xlsx",
+      "EsitiMSD_PrezziExAnte_20230401_20240331_Nord.xlsx",
+      "EsitiMSD_PrezziExAnte_20240401_20241231_Nord.xlsx"
+    ],
+    "expected_reward_training": true,
+    "milp_mode": "discrete"
+  },
+  "centralized_critic": true,
+  "milp_discrete_eur": 13592.891526943062,
+  "milp_objective_eur": 48930.65025324413,
+  "bc_eur": 14915.558337742748,
+  "ppo_eur": 15911.845516398682,
+  "ppo_eur_stochastic": 12541.296292693542,
+  "random_eur": -1658.7974996445214,
+  "ppo_share_of_milp": 1.1706004925338453,
+  "bc_share_of_milp": 1.0973057725192592,
+  "wall_seconds": 191.3272852897644,
+  "ok": true,
+  "error": "",
+  "learning_curve": [
+    2774.178524292657,
+    2602.1319984987226
+  ],
+  "collapsed": false
+}

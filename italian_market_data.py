@@ -277,8 +277,8 @@ def load_pun_from_gme_xlsx(
         ws = wb[sheet_name]
 
     # First pass: group entries by date in file order
-    rows_by_date: "OrderedDict[date, List[float]]" = {}
     import collections as _collections
+    # date -> list of hourly prices, in file order
     rows_by_date = _collections.OrderedDict()
     seen_header = False
     # Column index of the requested price series, resolved from the header
@@ -908,6 +908,12 @@ def build_yearly_service_catalog(
     afrr_dn_award_overrides: Optional[np.ndarray] = None,
     mfrr_up_award_overrides: Optional[np.ndarray] = None,
     mfrr_dn_award_overrides: Optional[np.ndarray] = None,
+    # Explicit request for the 5-service directional catalogue. Until now the
+    # only way to get it was to pass a directional override array, so purely
+    # synthetic data could not be directional at all: a directional consumer
+    # given such a catalogue finds no aFRR_up / aFRR_dn / mFRR_up / mFRR_dn on
+    # offer and silently trades arbitrage only.
+    directional: bool = False,
 ) -> List[List[FlexibilityService]]:
     """Build the per-hour FlexibilityService catalog for a contiguous date range.
 
@@ -941,8 +947,9 @@ def build_yearly_service_catalog(
             return default
         return float(v)
 
-    # Directional mode triggered if ANY directional override is provided
-    directional_mode = any(arr is not None for arr in (
+    # Directional mode: requested explicitly, or inferred from the presence of
+    # any directional override (the original behaviour, kept for back-compat).
+    directional_mode = bool(directional) or any(arr is not None for arr in (
         afrr_up_energy_overrides, afrr_dn_energy_overrides,
         mfrr_up_energy_overrides, mfrr_dn_energy_overrides,
         afrr_up_award_overrides,  afrr_dn_award_overrides,
@@ -1093,11 +1100,21 @@ def make_synthetic_market_window(
     pun_calibration: Optional[PUN2024Calibration] = None,
     service_calibration: Optional[ServiceCalibration] = None,
     seed: int = 0,
+    directional: bool = False,
 ) -> MarketWindow:
-    """Convenience constructor for testing: generate prices + services together."""
+    """Convenience constructor for testing: generate prices + services together.
+
+    `directional` must match the mode of whatever consumes the window. A
+    directional environment or MILP asked to trade against a legacy 3-service
+    catalogue finds no aFRR_up / aFRR_dn / mFRR_up / mFRR_dn on offer, zeroes
+    every directional reserve, and silently produces an arbitrage-only world:
+    rewards collapse to nothing and a timed MILP instance is far smaller than
+    the real one. Defaults to False for backward compatibility.
+    """
     gen = PUNSynthetic2024Generator(calibration=pun_calibration, seed=seed)
     prices = gen.generate(start_date, end_date)
-    services = build_yearly_service_catalog(start_date, end_date, service_calibration)
+    services = build_yearly_service_catalog(
+        start_date, end_date, service_calibration, directional=directional)
     return MarketWindow(
         start_date=start_date,
         end_date=end_date,
