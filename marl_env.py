@@ -190,6 +190,53 @@ OBS_DIM_FULL_FORESIGHT = OBS_DIM + _FF_HOURS + _FF_HOURS * _FF_N_SERVICES * 3  #
 # study would need a different network per fleet size. These six summary
 # statistics describe the same contention at any N.
 GLOBAL_STATE_DIM = 6
+
+
+# ---------------------------------------------------------------------------
+# Relative-position features (symmetry breaking)
+# ---------------------------------------------------------------------------
+# A shared policy can only differentiate on its OWN state, so two units in the
+# same condition emit the same action. Under a binding shared connection that
+# is fatal: the optimal allocation is ASYMMETRIC — the MILP sends some units to
+# full band and holds the rest — while the policy bids uniformly and the
+# projection scales everyone down in proportion.
+#
+# The global-state block does not fix this, because it is IDENTICAL for every
+# agent. It enables a COLLECTIVE response ("the cable is full, everyone back
+# off") but not a DIFFERENTIATED one ("you go, I wait"), and the differentiated
+# one is what the optimizer does.
+#
+# These three features are each unit's RANK WITHIN THE FLEET on the quantities
+# that decide who should get the scarce connection. They differ per agent by
+# construction, which is what makes an asymmetric joint bid representable at
+# all, and they are percentiles rather than raw values so they stay
+# N-invariant.
+#
+# ON DECENTRALISATION. A percentile needs the fleet distribution, so this is
+# decentralised execution WITH A BROADCAST coordination signal, not autonomous
+# operation: an aggregator computes the ranks and sends each unit one scalar.
+# That is how real aggregators work, and it must be stated as such rather than
+# claimed as fully independent execution.
+#
+# WHAT IT BREAKS, MEASURED. On a fleet with heterogeneous durations the block
+# already separates the CLUSTERS at step zero, because the same state of charge
+# buys different HOURS on a 1 h and on a 4 h unit. What still ties at t=0 is
+# units WITHIN a cluster, which are genuinely identical until they act; those
+# separate within the first hour and, once the states have diverged, all fifty
+# units carry distinct percentile triples.
+#
+# Guaranteeing asymmetry from step zero would need an arbitrary unit index.
+# That is deliberately not done: an index carries no meaning, does not transfer
+# to a different fleet, and would let the policy memorise unit numbers instead
+# of learning an allocation rule.
+RELATIVE_STATE_DIM = 3
+RELATIVE_STATE_SCHEMA = (
+    "pct_usable_discharge_hours",   # rank on energy available to discharge
+    "pct_charge_headroom_hours",    # rank on room available to charge
+    "pct_cumulative_throughput",    # rank on how much life has been spent
+)
+
+
 def mask_global_block(obs, has_block: bool):
     """Return the observation as a DECENTRALISED policy must see it.
 
@@ -300,6 +347,7 @@ class MultiBESSEnv(ParallelEnv):
         duration_features: bool = True,
         coupling: Optional[FleetCoupling] = None,
         centralized_critic: bool = False,
+        relative_features: bool = False,
     ):
         super().__init__()
         self.multi_params = multi_params
@@ -370,9 +418,13 @@ class MultiBESSEnv(ParallelEnv):
         self.full_foresight: bool = bool(getattr(self, "full_foresight", False))
         # Centralised-critic global state, appended at the end when enabled.
         self.centralized_critic: bool = bool(centralized_critic)
+        # Relative-position features (symmetry breaking). Unlike the global
+        # block these ARE visible to the actor and to the clone: each unit's
+        # own rank is a per-agent signal an aggregator can broadcast, not
+        # fleet-wide state only a critic may see.
+        self.relative_features: bool = bool(relative_features)
         _obs_dim = OBS_DIM_FULL_FORESIGHT if self.full_foresight else OBS_DIM
-        if self.centralized_critic:
-            _obs_dim += GLOBAL_STATE_DIM
+        _obs_dim += self._tail_width()
         # Observation bounds are loose, normalised features in [-2, 2]
         self._observation_space = spaces.Box(
             low=-2.0, high=2.0, shape=(_obs_dim,), dtype=np.float32,
@@ -573,6 +625,21 @@ class MultiBESSEnv(ParallelEnv):
         self._rebuild_observation_space()
         return self
 
+    def _tail_width(self) -> int:
+        """Width of the appended tail blocks, in order: relative, then global.
+
+        The ORDER matters and is fixed here so it cannot drift: the global
+        block must be LAST, because mask_global_block zeroes the final
+        GLOBAL_STATE_DIM entries. Putting the relative block after it would
+        make the mask erase the wrong features, silently.
+        """
+        w = 0
+        if getattr(self, "relative_features", False):
+            w += RELATIVE_STATE_DIM
+        if getattr(self, "centralized_critic", False):
+            w += GLOBAL_STATE_DIM
+        return w
+
     def _rebuild_observation_space(self):
         """Recompute the observation space after a flag change.
 
@@ -581,12 +648,16 @@ class MultiBESSEnv(ParallelEnv):
         the global state would silently truncate the tail.
         """
         _obs_dim = OBS_DIM_FULL_FORESIGHT if self.full_foresight else OBS_DIM
-        if getattr(self, "centralized_critic", False):
-            _obs_dim += GLOBAL_STATE_DIM
+        _obs_dim += self._tail_width()
         self._observation_space = spaces.Box(
             low=-2.0, high=2.0, shape=(_obs_dim,), dtype=np.float32,
         )
         return self
+
+    def configure_relative_features(self, enable: bool = True):
+        """Turn the relative-position block on or off. Returns self."""
+        self.relative_features = bool(enable)
+        return self._rebuild_observation_space()
 
     def configure_centralized_critic(self, enable: bool = True):
         """Append the global-state block to every agent's observation.
@@ -1356,6 +1427,52 @@ class MultiBESSEnv(ParallelEnv):
     # Observation builder
     # ------------------------------------------------------------------
 
+    def _relative_state(self, i: int) -> np.ndarray:
+        """Unit i's rank within the fleet on the quantities that decide who
+        should get the scarce shared connection.
+
+        Mid-rank percentiles: the fraction of the fleet strictly below, plus
+        half the ties. Ties matter here — identical units in an identical state
+        genuinely tie, and assigning arbitrary tie-break ranks would manufacture
+        an asymmetry the state does not contain and make the feature depend on
+        unit numbering.
+
+        COMPUTED ONCE PER STATE, FOR THE WHOLE FLEET. The first version rebuilt
+        the fleet arrays inside every agent's call, which is quadratic in N: at
+        fifty units it more than doubled the cost of building a set of
+        observations (5.3 ms to 12.3 ms), and that cost is paid at every step
+        of training AND of evaluation. The ranks are a property of the fleet
+        state, not of the asking agent, so they are computed for everyone at
+        once and cached until the state of charge changes.
+        """
+        n = max(self.n_agents, 1)
+        socs = np.asarray(self._socs[:n], dtype=np.float64)
+
+        cache = getattr(self, "_rel_cache", None)
+        if cache is None or not np.array_equal(cache[0], socs):
+            usable = np.empty(n)
+            headroom = np.empty(n)
+            spent = np.empty(n)
+            for j in range(n):
+                bp = self.multi_params.batteries[j]
+                p = max(bp.max_power_mw, 1e-9)
+                usable[j] = (socs[j] - self.soc_min) * bp.capacity_mwh / p
+                headroom[j] = (self.soc_max - socs[j]) * bp.capacity_mwh / p
+                spent[j] = self._lfp_states[j].fce_cumulative
+
+            ranks = np.empty((n, 3), dtype=np.float32)
+            for col, arr in enumerate((usable, headroom, spent)):
+                # Mid-rank percentile for every unit in one pass: searchsorted
+                # on the sorted array gives the count strictly below and the
+                # count at or below, so their mean is below + half the ties.
+                s = np.sort(arr)
+                lo = np.searchsorted(s, arr - 1e-12, side="left")
+                hi = np.searchsorted(s, arr + 1e-12, side="right")
+                ranks[:, col] = (lo + hi) / (2.0 * n)
+            self._rel_cache = (socs.copy(), ranks)
+
+        return self._rel_cache[1][i]
+
     def _global_state(self) -> np.ndarray:
         """Fleet-level summary for the centralised critic.
 
@@ -1514,8 +1631,17 @@ class MultiBESSEnv(ParallelEnv):
         # This makes the PPO a perfect-foresight agent like the MILP, isolating
         # "how close does the DRL get at equal information?" from the information
         # gap. Diagnostic only — not deployable.
-        if self.centralized_critic:
-            obs[-GLOBAL_STATE_DIM:] = self._global_state()
+        # Tail blocks, in the order fixed by _tail_width: relative first,
+        # global last. The global block must stay last because
+        # mask_global_block zeroes the final GLOBAL_STATE_DIM entries.
+        _tail = self._tail_width()
+        if _tail:
+            _base = len(obs) - _tail
+            if self.relative_features:
+                obs[_base:_base + RELATIVE_STATE_DIM] = self._relative_state(i)
+                _base += RELATIVE_STATE_DIM
+            if self.centralized_critic:
+                obs[_base:_base + GLOBAL_STATE_DIM] = self._global_state()
 
         if self.full_foresight:
             o = OBS_DIM  # start index

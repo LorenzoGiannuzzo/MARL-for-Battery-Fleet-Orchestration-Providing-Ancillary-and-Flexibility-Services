@@ -225,7 +225,8 @@ def _resolve_sustain(env_config: Dict[str, Any]):
 
 def _centralised_rl_module_kwargs(n_batteries, episode_hours,
                                   directional_services, fcnet_hiddens,
-                                  policy_ids):
+                                  policy_ids, duration_features,
+                                  relative_features):
     """RLModuleSpec kwargs for the centralised critic.
 
     Built here rather than at import so that a run without the flag never
@@ -242,9 +243,20 @@ def _centralised_rl_module_kwargs(n_batteries, episode_hours,
         BatteryParameters(capacity_mwh=2.0, max_power_mw=1.0,
                           degradation_cost_per_mwh=25000.0, cycle_life=8000)
     ] * max(1, int(n_batteries)))
+    # EVERY flag that changes the observation WIDTH must reach the probe. The
+    # spec declares an observation space, RLlib sizes the module from it, and
+    # the env then hands over a vector of a different length. That does not
+    # surface as a shape error: it surfaces as
+    #     assert to_module is not None
+    # deep inside RLlib's multi-agent env runner, forty minutes into a run.
+    # Sizing the probe from anything less than the full flag set is how that
+    # happens, so the list here must track the constructor.
     probe = MultiBESSEnv(
         probe_fleet, episode_hours=episode_hours,
-        directional_services=directional_services, centralized_critic=True)
+        directional_services=directional_services,
+        duration_features=bool(duration_features),
+        relative_features=bool(relative_features),
+        centralized_critic=True)
     spec = centralised_multi_rl_module_spec(
         policy_ids,
         probe.observation_space("bess_0"), probe.action_space("bess_0"),
@@ -338,6 +350,7 @@ def _env_creator(env_config: Dict[str, Any]):
         duration_features=bool(env_config.get("duration_features", True)),
         coupling=_resolve_coupling(env_config),
         centralized_critic=bool(env_config.get("centralized_critic", False)),
+        relative_features=bool(env_config.get("relative_features", False)),
     )
     if market_window is not None:
         # Offset the day-sampler seed off the env seed so the day sequence is
@@ -510,6 +523,9 @@ def build_default_config(
     # Append the fleet-level global state to every observation and give the
     # value head a module that reads it while the policy head does not.
     centralized_critic: bool = False,
+    # Per-agent rank within the fleet. Visible to the actor, unlike the global
+    # block: it is a broadcast per-unit signal, not fleet-wide state.
+    relative_features: bool = False,
     market_window_key: Optional[str] = None,
     carry_soc_across_episodes: bool = True,
 ) -> PPOConfig:
@@ -553,6 +569,7 @@ def build_default_config(
         # rebuilds the dataclass inside the env creator.
         duration_features=bool(duration_features),
         centralized_critic=bool(centralized_critic),
+        relative_features=bool(relative_features),
         coupling=(None if coupling is None
                   else {"connection_limit_mw": coupling.connection_limit_mw,
                         "label": coupling.label}),
@@ -604,7 +621,8 @@ def build_default_config(
                    # Every policy the run TRAINS needs its own module, or the
                    # ones left out would quietly keep a decentralised critic.
                    (list(CLUSTER_POLICY_IDS) if per_cluster_sizes is not None
-                    else [SHARED_POLICY_ID]))
+                    else [SHARED_POLICY_ID]),
+                   duration_features, relative_features)
                if centralized_critic else {}),
             model_config={
                 "fcnet_hiddens": list(fcnet_hiddens),

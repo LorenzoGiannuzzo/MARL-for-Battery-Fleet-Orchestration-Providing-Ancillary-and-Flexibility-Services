@@ -116,6 +116,7 @@ def generate_multi_day_expert_demos(
     # measuring the mismatch. The clone simply ignores the tail, at the cost
     # of six input weights.
     centralized_critic: bool = False,
+    relative_features: bool = False,
 ) -> MultiDayDemoResult:
     """Day-by-day MILP demo generation with rolling per-BESS state.
 
@@ -308,6 +309,7 @@ def generate_multi_day_expert_demos(
                 sustain_hours=sustain,
                 duration_features=duration_features,
                 centralized_critic=centralized_critic,
+                relative_features=relative_features,
                 coupling=coupling,
             )
             if enable_commitments:
@@ -387,6 +389,7 @@ def generate_multi_day_expert_demos(
             sustain_hours=sustain,
             duration_features=duration_features,
             centralized_critic=centralized_critic,
+            relative_features=relative_features,
             coupling=coupling,
         )
         if enable_commitments:
@@ -609,6 +612,7 @@ def evaluate_policy_multi_day(
     duration_features: bool = True,
     coupling: FleetCoupling = FleetCoupling.uncoupled(),
     centralized_critic: bool = False,
+    relative_features: bool = False,
 ) -> MultiDayEvalResult:
     """Evaluate a policy across multiple days with rolling state.
 
@@ -696,6 +700,7 @@ def evaluate_policy_multi_day(
             sustain_hours=sustain,
             duration_features=duration_features,
             centralized_critic=centralized_critic,
+            relative_features=relative_features,
             coupling=coupling,
         )
         if enable_commitments:
@@ -963,6 +968,12 @@ class FullPipelineResult:
     # PPO training learning curves (per-iteration mean episode reward) for
     # the marl_analysis chart generator. Keys: "ppo_vanilla", "ppo_bc".
     ppo_training_metrics: Optional[Dict[str, list]] = None
+    # Learner internals per iteration, kept alongside the reward curve.
+    # train_loop_rich already records them; the pipeline used to discard
+    # everything but episode_reward_mean, so the health of the critic — the
+    # whole point of a centralised one — could only be recovered by grepping
+    # the log. Shape: {policy: {metric: [per-iteration values]}}.
+    ppo_training_diagnostics: Optional[Dict[str, Dict[str, list]]] = None
 
     # Full BC training history (per-epoch train_loss + val_acc_per_axis), for
     # the BC training curves chart in marl_analysis.
@@ -1036,6 +1047,12 @@ def run_full_pipeline(
     # with independent units the joint value is the sum of the individual
     # ones and a global critic has nothing extra to learn.
     centralized_critic: bool = False,
+    # Per-agent rank within the fleet, visible to the actor and to the clone.
+    # Breaks the symmetry a shared policy otherwise cannot break.
+    relative_features: bool = False,
+    # Discount factor. gamma=1 makes the PPO optimise the same undiscounted
+    # daily objective the MILP does; 0.99 keeps earlier runs reproducible.
+    gamma: float = 0.99,
 ) -> FullPipelineResult:
     """End-to-end pipeline: data -> MILP demos -> BC training -> evaluation.
 
@@ -1157,6 +1174,7 @@ def run_full_pipeline(
             duration_features=duration_features,
             coupling=coupling,
             centralized_critic=centralized_critic,
+            relative_features=relative_features,
     )
     print(f"  demos: {train_demo.obs.shape[0]} samples, "
           f"total train MILP profit: {train_demo.total_milp_profit:.2f} EUR, "
@@ -1217,6 +1235,7 @@ def run_full_pipeline(
             duration_features=duration_features,
             coupling=coupling,
             centralized_critic=centralized_critic,
+            relative_features=relative_features,
     )
 
     # BC policy on the test window
@@ -1242,6 +1261,7 @@ def run_full_pipeline(
         coupling=coupling,
         duration_features=duration_features,
         sustain=sustain,
+        relative_features=relative_features,
     )
 
     # Random baseline on the test window
@@ -1266,6 +1286,7 @@ def run_full_pipeline(
         coupling=coupling,
         duration_features=duration_features,
         sustain=sustain,
+        relative_features=relative_features,
     )
 
     # ---- PPO comparison (Step 6 algorithm) ----
@@ -1275,6 +1296,7 @@ def run_full_pipeline(
     ppo_results: Dict[str, Any] = {}
     ppo_stochastic: Dict[str, float] = {}
     ppo_training_metrics: Dict[str, list] = {}
+    ppo_training_diagnostics: Dict[str, Dict[str, list]] = {}
     if run_ppo_vanilla or run_ppo_bc_warmstart:
         from marl_trainer import CLUSTER_POLICY_IDS, SHARED_POLICY_ID
         from marl_ppo_comparison import (train_ppo_policy,
@@ -1297,11 +1319,17 @@ def run_full_pipeline(
             duration_features=duration_features,
             coupling=coupling,
             centralized_critic=centralized_critic,
+            relative_features=relative_features,
         )
+        _raw = list(getattr(algo_v, "_lorenzo_training_metrics", []))
         ppo_training_metrics["ppo_vanilla"] = [
-            float(m.get("episode_reward_mean", 0.0) or 0.0)
-            for m in getattr(algo_v, "_lorenzo_training_metrics", [])
+            float(m.get("episode_reward_mean", 0.0) or 0.0) for m in _raw
         ]
+        ppo_training_diagnostics["ppo_vanilla"] = {
+            k: [(None if m.get(k) is None else float(m[k])) for m in _raw]
+            for k in ("vf_explained_var", "entropy", "bc_kl", "vf_loss",
+                      "policy_loss")
+        }
         print(f"[pipeline] PPO vanilla on test window...")
         ppo_v_eval = evaluate_policy_multi_day(
             fleet, test_window,
@@ -1323,6 +1351,7 @@ def run_full_pipeline(
             duration_features=duration_features,
             coupling=coupling,
             centralized_critic=centralized_critic,
+            relative_features=relative_features,
         )
         ppo_results["ppo_vanilla"] = ppo_v_eval
         try:
@@ -1343,6 +1372,7 @@ def run_full_pipeline(
             warmstart_entropy_coeff=warmstart_entropy_coeff,
             per_cluster_policies=per_cluster_policies,
             centralized_critic=centralized_critic,
+            relative_features=relative_features,
             market_window=train_window,
             use_nonlinear_degradation=use_nonlinear_degradation, seed=ppo_seed,
             directional_services=directional_services,
@@ -1356,10 +1386,15 @@ def run_full_pipeline(
             duration_features=duration_features,
             coupling=coupling,
         )
+        _raw = list(getattr(algo_w, "_lorenzo_training_metrics", []))
         ppo_training_metrics["ppo_bc"] = [
-            float(m.get("episode_reward_mean", 0.0) or 0.0)
-            for m in getattr(algo_w, "_lorenzo_training_metrics", [])
+            float(m.get("episode_reward_mean", 0.0) or 0.0) for m in _raw
         ]
+        ppo_training_diagnostics["ppo_bc"] = {
+            k: [(None if m.get(k) is None else float(m[k])) for m in _raw]
+            for k in ("vf_explained_var", "entropy", "bc_kl", "vf_loss",
+                      "policy_loss")
+        }
         print(f"[pipeline] PPO BC-warmstart on test window...")
         ppo_w_eval = evaluate_policy_multi_day(
             fleet, test_window,
@@ -1384,6 +1419,7 @@ def run_full_pipeline(
             duration_features=duration_features,
             coupling=coupling,
             centralized_critic=centralized_critic,
+            relative_features=relative_features,
         )
         # Evaluate the SAME policy both ways, always. Evaluation takes the
         # per-axis argmax while training samples from the distribution, and
@@ -1419,6 +1455,7 @@ def run_full_pipeline(
                 duration_features=duration_features,
                 coupling=coupling,
                 centralized_critic=centralized_critic,
+                relative_features=relative_features,
             )
             ppo_stochastic["ppo_bc"] = float(_stoch.total_profit_eur)
             print(f"[eval] ppo_bc  argmax {ppo_w_eval.total_profit_eur:,.2f} EUR"
@@ -1559,6 +1596,8 @@ def run_full_pipeline(
                if "ppo_bc" in ppo_results else {}),
         },
         ppo_training_metrics=ppo_training_metrics if ppo_training_metrics else None,
+        ppo_training_diagnostics=(ppo_training_diagnostics
+                                  if ppo_training_diagnostics else None),
         bc_history=history,
         train_demo_obs=train_demo.obs,
         train_demo_actions=train_demo.actions,

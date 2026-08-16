@@ -63,6 +63,8 @@ def main(argv=None):
     ap.add_argument("--centralized-critic", action="store_true")
     ap.add_argument("--per-cluster-policies", action="store_true")
     ap.add_argument("--no-duration-features", action="store_true")
+    ap.add_argument("--relative-features", action="store_true")
+    ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--tau", type=float, default=None)
     ap.add_argument("--milp-mode", choices=("continuous", "discrete"),
                     default="discrete")
@@ -151,17 +153,21 @@ def main(argv=None):
                + ("" if binds else "  <-- it will never bind"))
 
     # ---------------------------------------------------------------- 4
-    from marl_env import MultiBESSEnv, OBS_DIM, GLOBAL_STATE_DIM
+    from marl_env import (MultiBESSEnv, OBS_DIM, GLOBAL_STATE_DIM,
+                          RELATIVE_STATE_DIM)
     duration_features = not args.no_duration_features
     env = MultiBESSEnv(
         fleet, episode_hours=24, soc_init=0.5, seed=0,
         directional_services=True, sustain_hours=sustain, coupling=coupling,
         duration_features=duration_features,
-        centralized_critic=args.centralized_critic)
+        centralized_critic=args.centralized_critic,
+        relative_features=args.relative_features)
     env.reset(seed=0)
     width = env.observation_space("bess_0").shape[0]
     built = len(env._build_observation("bess_0"))
-    expected = OBS_DIM + (GLOBAL_STATE_DIM if args.centralized_critic else 0)
+    expected = (OBS_DIM
+                + (RELATIVE_STATE_DIM if args.relative_features else 0)
+                + (GLOBAL_STATE_DIM if args.centralized_critic else 0))
     report("observation width is consistent", width == built == expected,
            f"declared {width}, built {built}, expected {expected}")
 
@@ -237,6 +243,8 @@ def main(argv=None):
             directional_services=True, sustain_hours=sustain,
             coupling=coupling, duration_features=duration_features,
             centralized_critic=args.centralized_critic,
+            relative_features=args.relative_features,
+            gamma=args.gamma,
             per_cluster_sizes=(cluster_sizes_from_fleet(fleet)
                                if args.per_cluster_policies else None),
         )
@@ -244,11 +252,24 @@ def main(argv=None):
                f"policies: {sorted(cfg.policies) if cfg.policies else 'default'}")
         if args.centralized_critic:
             spec = getattr(cfg, "rl_module_spec", None)
-            n_mod = len(getattr(spec, "rl_module_specs", {}) or {})
-            n_pol = len(cfg.policies or [])
+            subs = getattr(spec, "rl_module_specs", {}) or {}
+            n_mod, n_pol = len(subs), len(cfg.policies or [])
             report("one centralised module per trained policy",
                    n_mod == n_pol and n_mod > 0,
                    f"{n_mod} module specs for {n_pol} policies")
+
+            # The spec declares an observation space and RLlib sizes the module
+            # from it. If it disagrees with what the environment produces, the
+            # failure is not a shape error: it is
+            #     assert to_module is not None
+            # inside RLlib's multi-agent env runner, forty minutes in. Compare
+            # them here, where it costs nothing.
+            spec_widths = {int(s.observation_space.shape[0])
+                           for s in subs.values()
+                           if getattr(s, "observation_space", None) is not None}
+            report("the module spec is sized for the environment's observation",
+                   spec_widths == {width},
+                   f"spec {sorted(spec_widths) or 'unknown'} vs environment {width}")
     except ImportError as exc:
         report("the RLlib configuration builds", None,
                f"ray/torch unavailable here: {exc}")

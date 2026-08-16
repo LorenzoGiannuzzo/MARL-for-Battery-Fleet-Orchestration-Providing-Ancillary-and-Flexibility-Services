@@ -48,6 +48,7 @@ WORLD_PARAMS = {
     "coupling",             # shared connection limit
     "duration_features",    # observation width and content
     "centralized_critic",   # observation width and content
+    "relative_features",    # observation width and content
     "directional_services", # which products exist
 }
 

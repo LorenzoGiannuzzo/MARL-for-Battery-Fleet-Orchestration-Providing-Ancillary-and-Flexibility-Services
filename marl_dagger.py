@@ -263,6 +263,7 @@ def collect_labelled_batch(
     coupling: FleetCoupling = FleetCoupling.uncoupled(),
     duration_features: bool = True,
     centralized_critic: bool = False,
+    relative_features: bool = False,
     milp_mode: str = "discrete",
     use_nonlinear_degradation: bool = False,
     rng: Optional[np.random.Generator] = None,
@@ -314,6 +315,8 @@ def collect_labelled_batch(
             directional_services=directional_services,
             sustain_hours=sustain, coupling=coupling,
             duration_features=duration_features,
+            centralized_critic=centralized_critic,
+            relative_features=relative_features,
         )
         env.reset(seed=env_seed + day)
         for i in range(N):
@@ -410,6 +413,7 @@ def run_dagger(
     coupling: FleetCoupling = FleetCoupling.uncoupled(),
     duration_features: bool = True,
     centralized_critic: bool = False,
+    relative_features: bool = False,
     milp_mode: str = "discrete",
     use_nonlinear_degradation: bool = False,
     verbose: bool = True,
@@ -446,6 +450,8 @@ def run_dagger(
             n_days=n_train_days, beta=beta,
             requery_stride_hours=config.requery_stride_hours,
             hours_per_day=hours_per_day,
+            centralized_critic=centralized_critic,
+            relative_features=relative_features,
             env_seed=env_seed, directional_services=directional_services,
             sustain=sustain, coupling=coupling,
             duration_features=duration_features, milp_mode=milp_mode,
@@ -499,6 +505,7 @@ def run_dagger(
                 duration_features=duration_features,
                 use_nonlinear_degradation=use_nonlinear_degradation,
                 centralized_critic=centralized_critic,
+                relative_features=relative_features,
             )
             rec.eval_profit_eur = float(ev.total_profit_eur)
 

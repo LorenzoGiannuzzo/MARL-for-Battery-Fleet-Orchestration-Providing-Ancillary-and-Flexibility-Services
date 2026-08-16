@@ -137,6 +137,12 @@ def train_ppo_policy(
     duration_features: bool = True,
     coupling=None,
     centralized_critic: bool = False,
+    relative_features: bool = False,
+    # Discount factor. The MILP maximises UNDISCOUNTED daily profit, so gamma=1
+    # is the setting under which the two optimise the same objective; 0.99 is
+    # kept as the default so earlier runs stay reproducible. On a finite 24-step
+    # episode with a terminal state gamma=1 is well defined.
+    gamma: float = 0.99,
 ):
     """Allena una shared-policy PPO sul MultiBESSEnv e restituisce l'algo RLlib."""
     # NOTE on Ray init: we deliberately do NOT call ray.init() here. Earlier runs
@@ -189,6 +195,8 @@ def train_ppo_policy(
         duration_features=duration_features,
         coupling=coupling,
         centralized_critic=centralized_critic,
+        relative_features=relative_features,
+        gamma=gamma,
     )
 
     # Which policies this run actually trains. Everything downstream (the BC

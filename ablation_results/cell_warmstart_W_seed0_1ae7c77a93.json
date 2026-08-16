@@ -1,0 +1,68 @@
+{
+  "config_key": "W",
+  "config_label": "PPO warm start (full)",
+  "seed": 0,
+  "sustain_label": "sogl_default",
+  "tau_fcr": 0.25,
+  "durations": [
+    1.0,
+    2.0,
+    4.0
+  ],
+  "per_cluster_policies": false,
+  "duration_features": true,
+  "connection_limit_mw": 2.4,
+  "config_fingerprint": "1ae7c77a93",
+  "config_summary": {
+    "tag": "warmstart",
+    "n_units": 3,
+    "durations": [
+      1.0,
+      2.0,
+      4.0
+    ],
+    "total_mw": 4.0,
+    "train_start": "2023-01-01 00:00:00",
+    "train_days": 10,
+    "test_days": 5,
+    "ppo_iterations": 2,
+    "sustain": {
+      "fcr": 0.25,
+      "afrr": 1.0,
+      "mfrr": 2.0
+    },
+    "connection_limit_mw": 2.4,
+    "centralized_critic": true,
+    "duration_features": true,
+    "per_cluster_policies": false,
+    "price_column": "PUN",
+    "pun": [],
+    "msd": [],
+    "expected_reward_training": true,
+    "milp_mode": "discrete",
+    "relative_features": true,
+    "gamma": 0.99
+  },
+  "centralized_critic": true,
+  "relative_features": true,
+  "gamma": 0.99,
+  "vf_explained_var_final": 8.0108642578125e-05,
+  "entropy_final": 8.703929901123047,
+  "bc_kl_final": 0.11054413765668869,
+  "milp_discrete_eur": 6188.619759056961,
+  "milp_objective_eur": 6141.982260577777,
+  "bc_eur": 5140.982464822603,
+  "ppo_eur": 0.0,
+  "ppo_eur_stochastic": 2879.434178984995,
+  "random_eur": -1018.5575770794148,
+  "ppo_share_of_milp": 0.0,
+  "bc_share_of_milp": 0.8307155173492191,
+  "wall_seconds": 2651.2501451969147,
+  "ok": true,
+  "error": "",
+  "learning_curve": [
+    1096.8603473964722,
+    770.1033973164315
+  ],
+  "collapsed": false
+}

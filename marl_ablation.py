@@ -159,6 +159,15 @@ class CellResult:
     config_summary: Dict[str, Any] = field(default_factory=dict)
     # True when the value head saw the fleet-level global state (CTDE).
     centralized_critic: bool = False
+    # Per-agent rank within the fleet (symmetry breaking), and the discount.
+    relative_features: bool = False
+    gamma: float = 0.99
+    # Learner internals at the END of training. The critic's explained variance
+    # is the termometer for a centralised critic: without it recorded here, the
+    # only way to know whether it learned anything was to grep the log.
+    vf_explained_var_final: float = float("nan")
+    entropy_final: float = float("nan")
+    bc_kl_final: float = float("nan")
 
     # headline profits on the held-out window, EUR
     milp_discrete_eur: float = float("nan")
@@ -242,6 +251,8 @@ def run_cell(
     duration_features: bool = True,
     coupling: FleetCoupling = FleetCoupling.uncoupled(),
     centralized_critic: bool = False,
+    relative_features: bool = False,
+    gamma: float = 0.99,
 ) -> CellResult:
     """Run one (configuration, seed) pair through the full pipeline."""
     from marl_pipeline import run_full_pipeline
@@ -258,6 +269,8 @@ def run_cell(
         duration_features=bool(duration_features),
         connection_limit_mw=coupling.connection_limit_mw,
         centralized_critic=bool(centralized_critic),
+        relative_features=bool(relative_features),
+        gamma=float(gamma),
     )
     t0 = time.time()
     try:
@@ -281,6 +294,8 @@ def run_cell(
             duration_features=duration_features,
             coupling=coupling,
             centralized_critic=centralized_critic,
+            relative_features=relative_features,
+            gamma=gamma,
             ppo_iterations=ppo_iterations,
             directional_services=True,
             real_pun_xlsx_path=real_pun_xlsx_path,
@@ -321,6 +336,16 @@ def run_cell(
         # training.
         _stoch_dead = (math.isnan(res.ppo_eur_stochastic)
                        or abs(res.ppo_eur_stochastic) < 1.0)
+        # Learner internals at the end of training.
+        _diag = (out.ppo_training_diagnostics or {}).get(
+            "ppo_vanilla" if not cfg.warm else "ppo_bc", {})
+        for _field, _key in (("vf_explained_var_final", "vf_explained_var"),
+                             ("entropy_final", "entropy"),
+                             ("bc_kl_final", "bc_kl")):
+            _series = [v for v in (_diag.get(_key) or []) if v is not None]
+            if _series:
+                setattr(res, _field, float(_series[-1]))
+
         res.collapsed = (abs(res.ppo_eur) < 1e-9
                          and all(abs(p) < 1e-9 for p in parts)
                          and _stoch_dead)
@@ -354,6 +379,8 @@ def run_ablation(
     duration_features: bool = True,
     coupling: FleetCoupling = FleetCoupling.uncoupled(),
     centralized_critic: bool = False,
+    relative_features: bool = False,
+    gamma: float = 0.99,
     # Ignore checkpoints and recompute. The fingerprint keys a cell by its
     # CONFIGURATION, which is what makes results from different experiments
     # impossible to confuse. It cannot know the CODE changed: a fix that alters
@@ -388,6 +415,8 @@ def run_ablation(
         msd=[os.path.basename(str(p)) for p in (real_msd_xlsx_paths or [])],
         expected_reward_training=bool(expected_reward_training),
         milp_mode=milp_mode,
+        relative_features=bool(relative_features),
+        gamma=float(gamma),
     )
     fp = config_fingerprint(**fp_parts)
 
@@ -402,6 +431,11 @@ def run_ablation(
           + ("  (SYNTHETIC prices: the flag has no effect)"
              if real_pun_xlsx_path is None else ""))
     print(f"  fleet coupling: {coupling.describe()}")
+    print(f"  relative-position features: "
+          f"{'ON (symmetry breaking)' if relative_features else 'OFF'}")
+    print(f"  gamma: {gamma:g}"
+          + ("   (matches the MILP's undiscounted objective)" if gamma >= 1.0
+             else "   (the MILP is undiscounted: gamma=1 aligns them)"))
     print(f"  centralised critic: "
           f"{'ON (CTDE)' if centralized_critic else 'OFF'}")
     print(f"  duration-relative obs features: "
@@ -466,6 +500,8 @@ def run_ablation(
                 duration_features=duration_features,
                 coupling=coupling,
                 centralized_critic=centralized_critic,
+                relative_features=relative_features,
+                gamma=gamma,
             )
             r.config_fingerprint = fp
             r.config_summary = dict(fp_parts)
@@ -523,6 +559,8 @@ def write_reports(results: List[CellResult], outdir: str,
             "milp_discrete_eur", "milp_objective_eur", "bc_eur", "ppo_eur",
             "per_cluster_policies", "duration_features",
             "connection_limit_mw", "centralized_critic",
+            "relative_features", "gamma", "vf_explained_var_final",
+            "entropy_final", "bc_kl_final",
             "ppo_eur_stochastic", "random_eur",
             "ppo_share_of_milp",
             "bc_share_of_milp",
@@ -811,6 +849,19 @@ def main(argv=None):
     ap.add_argument("--tau", type=float, default=None,
                     help="tau_FCR for the warm-start ablation "
                          "(default: SO GL 0.25 h)")
+    ap.add_argument("--relative-features", action="store_true",
+                    help="give each unit its RANK within the fleet on usable "
+                         "energy, headroom and spent life. A shared policy can "
+                         "otherwise only differentiate on its own absolute "
+                         "state, so two units in the same condition bid "
+                         "identically and a scarce shared connection is split "
+                         "uniformly instead of asymmetrically.")
+    ap.add_argument("--gamma", type=float, default=0.99,
+                    help="discount factor. The MILP maximises UNDISCOUNTED "
+                         "daily profit, so gamma=1 is the setting under which "
+                         "the two optimise the same objective. Arbitrage is a "
+                         "delayed reward while capacity is immediate, so a "
+                         "discount penalises arbitrage specifically.")
     ap.add_argument("--centralized-critic", action="store_true",
                     help="give the value head the fleet-level global state "
                          "while the policy head keeps only its own (CTDE). "
@@ -945,6 +996,8 @@ def main(argv=None):
         duration_features=(not args.no_duration_features),
         coupling=coupling,
         centralized_critic=args.centralized_critic,
+        relative_features=args.relative_features,
+        gamma=args.gamma,
         force=args.force,
     )
     write_reports(res, args.outdir, tag="warmstart")
