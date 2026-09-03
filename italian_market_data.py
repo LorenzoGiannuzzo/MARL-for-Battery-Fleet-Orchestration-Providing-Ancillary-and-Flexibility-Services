@@ -428,10 +428,14 @@ def make_market_window_from_real_pun(
     supplied, MSD data feeds the per-hour energy_price and (if
     `msd_use_empirical_award_rates=True`) the per-hour award_probability of
     aFRR/mFRR. The mapping is:
-      - aFRR <- upward MSD (Prezzo Medio di Acquisto): activation rate and
+      - aFRR <- upward MSD (Prezzo Medio di VENDITA: sale offers are the
+        upward movement, and that is the price the provider receives):
+        activation rate and
         mean price-when-active, both as 24-value per-hour-of-day profiles
         derived from the full year. Tiled across the date range.
-      - mFRR <- downward MSD (Prezzo Medio di Vendita) with a 0.6 multiplier
+      - mFRR <- downward MSD (Prezzo Medio di ACQUISTO: purchase offers are
+        the downward movement, and that is the price the provider pays)
+        with a 0.6 multiplier
         on award rate to reflect the manual-vs-automatic nature.
       - FCR  unchanged, kept synthetic from ServiceCalibration (FCR is
         cleared on a separate European market, not in MSD).
@@ -765,16 +769,40 @@ def msd_hourly_profiles(
     up_price  = np.zeros(24, dtype=np.float64)
     dn_rate   = np.zeros(24, dtype=np.float64)
     dn_price  = np.zeros(24, dtype=np.float64)
+    # WHICH COLUMN IS WHICH DIRECTION.
+    #
+    # In MSD terminology the OFFER type names the direction, and it is the
+    # opposite of the intuitive reading:
+    #
+    #   "offerte di VENDITA"  = movimentazione A SALIRE. The operator SELLS
+    #                           energy to Terna at P+ (a generator raises
+    #                           output, a load reduces consumption and resells
+    #                           the energy it had already bought).
+    #   "offerte di ACQUISTO" = movimentazione A SCENDERE. The operator BUYS
+    #                           energy back from Terna at P- (a generator cuts
+    #                           output and rebuys, a load raises consumption
+    #                           and pays for the extra energy).
+    #
+    # So Terna's "Prezzo Medio di Vendita" is the UPWARD price the provider
+    # RECEIVES, and "Prezzo Medio di Acquisto" is the DOWNWARD price it PAYS.
+    #
+    # The 2023 northern-zone data confirms it against a 177 EUR/MWh mean PUN:
+    # Vendita averages 241 (a premium for short-notice energy, as it must be)
+    # and Acquisto averages 111 (a discount buyback, as it must be). Mapping
+    # them the other way round gave upward 111 against a 177 spot price, so no
+    # optimizer ever offered upward reserve, and downward cost 241 to absorb
+    # energy worth 177, so it was pure loss. Every service result in this
+    # project was produced under that inversion.
     for h in range(24):
         sub = df[df['hour'] == h]
         if len(sub) == 0:
             continue
-        up_rate[h]  = float((sub['p_buy_mean'] > 0).mean())
-        active_up = sub[sub['p_buy_mean'] > 0]
-        up_price[h] = float(active_up['p_buy_mean'].mean()) if len(active_up) > 0 else 0.0
-        dn_rate[h]  = float((sub['p_sell_mean'] > 0).mean())
-        active_dn = sub[sub['p_sell_mean'] > 0]
-        dn_price[h] = float(active_dn['p_sell_mean'].mean()) if len(active_dn) > 0 else 0.0
+        up_rate[h]  = float((sub['p_sell_mean'] > 0).mean())
+        active_up = sub[sub['p_sell_mean'] > 0]
+        up_price[h] = float(active_up['p_sell_mean'].mean()) if len(active_up) > 0 else 0.0
+        dn_rate[h]  = float((sub['p_buy_mean'] > 0).mean())
+        active_dn = sub[sub['p_buy_mean'] > 0]
+        dn_price[h] = float(active_dn['p_buy_mean'].mean()) if len(active_dn) > 0 else 0.0
     return {
         "upward_award_rate": up_rate,
         "upward_price_when_active": up_price,
@@ -1170,12 +1198,24 @@ def msd_conditioned_profiles(xlsx_paths, year=None, min_cell_samples: int = 20):
             s = sub[sub['hour'] == h]
             if len(s) == 0:
                 continue
-            up_r[h] = float((s['p_buy'] > 0).mean())
-            au = s[s['p_buy'] > 0]
-            up_p[h] = float(au['p_buy'].mean()) if len(au) else 0.0
-            dn_r[h] = float((s['p_sell'] > 0).mean())
-            ad = s[s['p_sell'] > 0]
-            dn_p[h] = float(ad['p_sell'].mean()) if len(ad) else 0.0
+            # Direction mapping: see the long note in msd_hourly_profiles.
+            # "offerte di VENDITA" are the UPWARD movement (the provider sells
+            # energy to Terna and is paid), "offerte di ACQUISTO" are the
+            # DOWNWARD one (the provider buys energy back and pays). Verified
+            # on 2023 northern-zone data against a 177 EUR/MWh mean PUN:
+            # Vendita averages 241 (a premium, hence upward) and Acquisto 111
+            # (a discount, hence downward).
+            #
+            # THIS is the function the pipeline actually calls — the log line
+            # reads "MSD profiles (CONDITIONED ...)". Correcting only
+            # msd_hourly_profiles left the results bit-identical, which is how
+            # the duplication was found.
+            up_r[h] = float((s['p_sell'] > 0).mean())
+            au = s[s['p_sell'] > 0]
+            up_p[h] = float(au['p_sell'].mean()) if len(au) else 0.0
+            dn_r[h] = float((s['p_buy'] > 0).mean())
+            ad = s[s['p_buy'] > 0]
+            dn_p[h] = float(ad['p_buy'].mean()) if len(ad) else 0.0
         return up_r, up_p, dn_r, dn_p
 
     fb = _agg(df)

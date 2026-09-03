@@ -1,0 +1,464 @@
+{
+  "year_label": "2023",
+  "sustain_label": "sogl_default",
+  "portfolio": [
+    {
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "capacity_mwh": 2.0,
+      "index": 0,
+      "clears_threshold_alone": false
+    },
+    {
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "capacity_mwh": 2.0,
+      "index": 1,
+      "clears_threshold_alone": false
+    },
+    {
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "capacity_mwh": 2.0,
+      "index": 2,
+      "clears_threshold_alone": false
+    },
+    {
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "capacity_mwh": 2.0,
+      "index": 3,
+      "clears_threshold_alone": false
+    },
+    {
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "capacity_mwh": 2.0,
+      "index": 4,
+      "clears_threshold_alone": false
+    },
+    {
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "capacity_mwh": 2.0,
+      "index": 5,
+      "clears_threshold_alone": false
+    },
+    {
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "capacity_mwh": 2.0,
+      "index": 6,
+      "clears_threshold_alone": false
+    },
+    {
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "capacity_mwh": 2.0,
+      "index": 7,
+      "clears_threshold_alone": false
+    },
+    {
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "capacity_mwh": 2.0,
+      "index": 8,
+      "clears_threshold_alone": true
+    },
+    {
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "capacity_mwh": 2.0,
+      "index": 9,
+      "clears_threshold_alone": true
+    },
+    {
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "capacity_mwh": 2.0,
+      "index": 10,
+      "clears_threshold_alone": true
+    },
+    {
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "capacity_mwh": 2.0,
+      "index": 11,
+      "clears_threshold_alone": true
+    },
+    {
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "capacity_mwh": 2.0,
+      "index": 12,
+      "clears_threshold_alone": true
+    },
+    {
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "capacity_mwh": 2.0,
+      "index": 13,
+      "clears_threshold_alone": true
+    },
+    {
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "capacity_mwh": 2.0,
+      "index": 14,
+      "clears_threshold_alone": true
+    },
+    {
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "capacity_mwh": 2.0,
+      "index": 15,
+      "clears_threshold_alone": true
+    },
+    {
+      "label": "large_1h",
+      "power_mw": 2.5,
+      "duration_h": 1.0,
+      "capacity_mwh": 2.5,
+      "index": 16,
+      "clears_threshold_alone": true
+    },
+    {
+      "label": "large_1h",
+      "power_mw": 2.5,
+      "duration_h": 1.0,
+      "capacity_mwh": 2.5,
+      "index": 17,
+      "clears_threshold_alone": true
+    },
+    {
+      "label": "large_1h",
+      "power_mw": 2.5,
+      "duration_h": 1.0,
+      "capacity_mwh": 2.5,
+      "index": 18,
+      "clears_threshold_alone": true
+    },
+    {
+      "label": "large_1h",
+      "power_mw": 2.5,
+      "duration_h": 1.0,
+      "capacity_mwh": 2.5,
+      "index": 19,
+      "clears_threshold_alone": true
+    }
+  ],
+  "standalone": {
+    "label": "standalone",
+    "total_eur": 12484716.443020102,
+    "arbitrage_eur": 10073821.987011133,
+    "flexibility_eur": 2667786.9348005154,
+    "degradation_eur": 256892.4787915516,
+    "revenue_by_service": {
+      "FCR": 0.0,
+      "aFRR_up": 0.0,
+      "aFRR_dn": 2667786.9348005154,
+      "mFRR_up": 0.0,
+      "mFRR_dn": 0.0
+    },
+    "n_days": 365,
+    "n_optimal": 7300,
+    "n_solves": 7300,
+    "seconds": 65139.560767650604
+  },
+  "aggregated": {
+    "label": "aggregated",
+    "total_eur": 15331529.397798942,
+    "arbitrage_eur": 12282292.353224829,
+    "flexibility_eur": 3350362.044574126,
+    "degradation_eur": 301125.0,
+    "revenue_by_service": {
+      "FCR": 0.0,
+      "aFRR_up": 0.0,
+      "aFRR_dn": 3337385.830076018,
+      "mFRR_up": 0.0,
+      "mFRR_dn": 12976.214498129699
+    },
+    "n_days": 365,
+    "n_optimal": 365,
+    "n_solves": 365,
+    "seconds": 21571.532961845398
+  },
+  "units": [
+    {
+      "index": 0,
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "standalone_eur": 51750.70502354619,
+      "standalone_arbitrage_eur": 53698.96203531911,
+      "standalone_flex_eur": 0.0,
+      "standalone_degradation_eur": 1948.2570117728405,
+      "aggregated_eur": 371416.13049843506,
+      "aggregated_arbitrage_eur": 302115.28857629583,
+      "aggregated_degradation_eur": 6843.75
+    },
+    {
+      "index": 1,
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "standalone_eur": 51750.70502354619,
+      "standalone_arbitrage_eur": 53698.96203531911,
+      "standalone_flex_eur": 0.0,
+      "standalone_degradation_eur": 1948.2570117728405,
+      "aggregated_eur": 371416.13049843506,
+      "aggregated_arbitrage_eur": 302115.28857629583,
+      "aggregated_degradation_eur": 6843.75
+    },
+    {
+      "index": 2,
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "standalone_eur": 51750.70502354619,
+      "standalone_arbitrage_eur": 53698.96203531911,
+      "standalone_flex_eur": 0.0,
+      "standalone_degradation_eur": 1948.2570117728405,
+      "aggregated_eur": 371416.13049843506,
+      "aggregated_arbitrage_eur": 302115.28857629583,
+      "aggregated_degradation_eur": 6843.75
+    },
+    {
+      "index": 3,
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "standalone_eur": 51750.70502354619,
+      "standalone_arbitrage_eur": 53698.96203531911,
+      "standalone_flex_eur": 0.0,
+      "standalone_degradation_eur": 1948.2570117728405,
+      "aggregated_eur": 371416.13049843506,
+      "aggregated_arbitrage_eur": 302115.28857629583,
+      "aggregated_degradation_eur": 6843.75
+    },
+    {
+      "index": 4,
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "standalone_eur": 51750.70502354619,
+      "standalone_arbitrage_eur": 53698.96203531911,
+      "standalone_flex_eur": 0.0,
+      "standalone_degradation_eur": 1948.2570117728405,
+      "aggregated_eur": 371416.13049843506,
+      "aggregated_arbitrage_eur": 302115.28857629583,
+      "aggregated_degradation_eur": 6843.75
+    },
+    {
+      "index": 5,
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "standalone_eur": 51750.70502354619,
+      "standalone_arbitrage_eur": 53698.96203531911,
+      "standalone_flex_eur": 0.0,
+      "standalone_degradation_eur": 1948.2570117728405,
+      "aggregated_eur": 371416.13049843506,
+      "aggregated_arbitrage_eur": 302115.28857629583,
+      "aggregated_degradation_eur": 6843.75
+    },
+    {
+      "index": 6,
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "standalone_eur": 51750.70502354619,
+      "standalone_arbitrage_eur": 53698.96203531911,
+      "standalone_flex_eur": 0.0,
+      "standalone_degradation_eur": 1948.2570117728405,
+      "aggregated_eur": 371416.13049843506,
+      "aggregated_arbitrage_eur": 302115.28857629583,
+      "aggregated_degradation_eur": 6843.75
+    },
+    {
+      "index": 7,
+      "label": "small_4h",
+      "power_mw": 0.5,
+      "duration_h": 4.0,
+      "standalone_eur": 51750.70502354619,
+      "standalone_arbitrage_eur": 53698.96203531911,
+      "standalone_flex_eur": 0.0,
+      "standalone_degradation_eur": 1948.2570117728405,
+      "aggregated_eur": 371416.13049843506,
+      "aggregated_arbitrage_eur": 302115.28857629583,
+      "aggregated_degradation_eur": 6843.75
+    },
+    {
+      "index": 8,
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "standalone_eur": 659333.4195995945,
+      "standalone_arbitrage_eur": 529660.470892075,
+      "standalone_flex_eur": 142726.8765446903,
+      "standalone_degradation_eur": 13053.92783717111,
+      "aggregated_eur": 697885.2078802296,
+      "aggregated_arbitrage_eur": 559283.5240359511,
+      "aggregated_degradation_eur": 13687.5
+    },
+    {
+      "index": 9,
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "standalone_eur": 659333.4195995945,
+      "standalone_arbitrage_eur": 529660.470892075,
+      "standalone_flex_eur": 142726.8765446903,
+      "standalone_degradation_eur": 13053.92783717111,
+      "aggregated_eur": 697885.2078802296,
+      "aggregated_arbitrage_eur": 559283.5240359511,
+      "aggregated_degradation_eur": 13687.5
+    },
+    {
+      "index": 10,
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "standalone_eur": 659333.4195995945,
+      "standalone_arbitrage_eur": 529660.470892075,
+      "standalone_flex_eur": 142726.8765446903,
+      "standalone_degradation_eur": 13053.92783717111,
+      "aggregated_eur": 697885.2078802296,
+      "aggregated_arbitrage_eur": 559283.5240359511,
+      "aggregated_degradation_eur": 13687.5
+    },
+    {
+      "index": 11,
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "standalone_eur": 659333.4195995945,
+      "standalone_arbitrage_eur": 529660.470892075,
+      "standalone_flex_eur": 142726.8765446903,
+      "standalone_degradation_eur": 13053.92783717111,
+      "aggregated_eur": 697885.2078802296,
+      "aggregated_arbitrage_eur": 559283.5240359511,
+      "aggregated_degradation_eur": 13687.5
+    },
+    {
+      "index": 12,
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "standalone_eur": 659333.4195995945,
+      "standalone_arbitrage_eur": 529660.470892075,
+      "standalone_flex_eur": 142726.8765446903,
+      "standalone_degradation_eur": 13053.92783717111,
+      "aggregated_eur": 697885.2078802296,
+      "aggregated_arbitrage_eur": 559283.5240359511,
+      "aggregated_degradation_eur": 13687.5
+    },
+    {
+      "index": 13,
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "standalone_eur": 659333.4195995945,
+      "standalone_arbitrage_eur": 529660.470892075,
+      "standalone_flex_eur": 142726.8765446903,
+      "standalone_degradation_eur": 13053.92783717111,
+      "aggregated_eur": 697885.2078802296,
+      "aggregated_arbitrage_eur": 559283.5240359511,
+      "aggregated_degradation_eur": 13687.5
+    },
+    {
+      "index": 14,
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "standalone_eur": 659333.4195995945,
+      "standalone_arbitrage_eur": 529660.470892075,
+      "standalone_flex_eur": 142726.8765446903,
+      "standalone_degradation_eur": 13053.92783717111,
+      "aggregated_eur": 697885.2078802296,
+      "aggregated_arbitrage_eur": 559283.5240359511,
+      "aggregated_degradation_eur": 13687.5
+    },
+    {
+      "index": 15,
+      "label": "medium_2h",
+      "power_mw": 1.0,
+      "duration_h": 2.0,
+      "standalone_eur": 659333.4195995945,
+      "standalone_arbitrage_eur": 529660.470892075,
+      "standalone_flex_eur": 142726.8765446903,
+      "standalone_degradation_eur": 13053.92783717111,
+      "aggregated_eur": 697885.2078802296,
+      "aggregated_arbitrage_eur": 559283.5240359511,
+      "aggregated_degradation_eur": 13687.5
+    },
+    {
+      "index": 16,
+      "label": "large_1h",
+      "power_mw": 2.5,
+      "duration_h": 1.0,
+      "standalone_eur": 1699010.861508744,
+      "standalone_arbitrage_eur": 1351736.6308979956,
+      "standalone_flex_eur": 381492.9806107483,
+      "standalone_degradation_eur": 34218.75,
+      "aggregated_eur": 1694279.672692407,
+      "aggregated_arbitrage_eur": 1347775.4630817107,
+      "aggregated_degradation_eur": 34218.75
+    },
+    {
+      "index": 17,
+      "label": "large_1h",
+      "power_mw": 2.5,
+      "duration_h": 1.0,
+      "standalone_eur": 1699010.861508744,
+      "standalone_arbitrage_eur": 1351736.6308979956,
+      "standalone_flex_eur": 381492.9806107483,
+      "standalone_degradation_eur": 34218.75,
+      "aggregated_eur": 1694279.672692407,
+      "aggregated_arbitrage_eur": 1347775.4630817107,
+      "aggregated_degradation_eur": 34218.75
+    },
+    {
+      "index": 18,
+      "label": "large_1h",
+      "power_mw": 2.5,
+      "duration_h": 1.0,
+      "standalone_eur": 1699010.861508744,
+      "standalone_arbitrage_eur": 1351736.6308979956,
+      "standalone_flex_eur": 381492.9806107483,
+      "standalone_degradation_eur": 34218.75,
+      "aggregated_eur": 1694279.672692407,
+      "aggregated_arbitrage_eur": 1347775.4630817107,
+      "aggregated_degradation_eur": 34218.75
+    },
+    {
+      "index": 19,
+      "label": "large_1h",
+      "power_mw": 2.5,
+      "duration_h": 1.0,
+      "standalone_eur": 1699010.861508744,
+      "standalone_arbitrage_eur": 1351736.6308979956,
+      "standalone_flex_eur": 381492.9806107483,
+      "standalone_degradation_eur": 34218.75,
+      "aggregated_eur": 1694279.672692407,
+      "aggregated_arbitrage_eur": 1347775.4630817107,
+      "aggregated_degradation_eur": 34218.75
+    }
+  ]
+}

@@ -43,7 +43,7 @@ from typing import Dict, List, Optional, Tuple
 import pulp
 
 from milp_optimizer import BatteryParameters
-from flexibility_market import FlexibilityService, ServiceType
+from flexibility_market import DIRECTIONAL_SERVICES_DN, FlexibilityService, ServiceType
 
 
 # ============================================================================
@@ -563,6 +563,31 @@ class MultiBESSMILPOptimizer:
     # Constraints
     # ------------------------------------------------------------------
 
+    _KEY_TO_SERVICE_ENUM = {
+        'fcr': ServiceType.FCR, 'afrr': ServiceType.AFRR,
+        'mfrr': ServiceType.MFRR, 'afrr_up': ServiceType.AFRR_UP,
+        'afrr_dn': ServiceType.AFRR_DN, 'mfrr_up': ServiceType.MFRR_UP,
+        'mfrr_dn': ServiceType.MFRR_DN,
+    }
+
+    def _key_to_service_enum(self, s_key: str):
+        return self._KEY_TO_SERVICE_ENUM[s_key]
+
+    def _service_at(self, t: int, s_enum):
+        """The service offered at hour t, or None if that product is absent.
+
+        Returns None rather than raising: a catalogue may legitimately not
+        offer every product in every hour, and the callers already treat a
+        missing product as zero.
+        """
+        catalogue = getattr(self, "_current_services", None)
+        if not catalogue or t >= len(catalogue):
+            return None
+        for s in catalogue[t]:
+            if s.service_type == s_enum:
+                return s
+        return None
+
     def _add_battery_constraints(self, v: Dict, T: int):
         """Per-BESS dynamics, power balance, mutual exclusion."""
         for i, bp in enumerate(self.multi_params.batteries):
@@ -582,10 +607,41 @@ class MultiBESSMILPOptimizer:
                 P_max = bp.max_power_mw
 
                 if self.directional_services:
-                    # Aggregated activation energy per direction
-                    A_up = pulp.lpSum(v[f'A_{s}'][(i, t)]
+                    # EXPECTED activation energy per direction.
+                    #
+                    # The energy and the money must be weighted the same way.
+                    # They were not: the state of charge moved by the FULL
+                    # activation A while the objective priced only
+                    # p_activation * p_award * A, which for mFRR is 0.15. A
+                    # unit therefore received a whole MWh into its state of
+                    # charge and paid for 15% of it on downward regulation,
+                    # and delivered a whole MWh while being paid 15% of it on
+                    # upward. Downward became a machine for buying energy at
+                    # 27 EUR/MWh and reselling it at 130, and upward a
+                    # guaranteed loss.
+                    #
+                    # That single inconsistency, not the price level, is why
+                    # aFRR_up and mFRR_up were EXACTLY zero in every run this
+                    # project has produced and why 99%+ of service revenue
+                    # landed on the downward products — the concentration
+                    # Reviewer 2 flagged as a likely calibration artifact.
+                    #
+                    # Both sides are now taken in expectation, consistently
+                    # with how the objective already prices capacity. The
+                    # alternative, keeping the energy deterministic and paying
+                    # the full price, would require modelling activation as an
+                    # event rather than a fraction.
+                    def _w(s_key):
+                        s_enum = self._key_to_service_enum(s_key)
+                        s = self._service_at(t, s_enum)
+                        if s is None:
+                            return 0.0
+                        return float(s.activation_probability) * float(
+                            s.award_probability)
+
+                    A_up = pulp.lpSum(_w(s) * v[f'A_{s}'][(i, t)]
                                        for s in self._upward_service_keys)
-                    A_dn = pulp.lpSum(v[f'A_{s}'][(i, t)]
+                    A_dn = pulp.lpSum(_w(s) * v[f'A_{s}'][(i, t)]
                                        for s in self._downward_service_keys)
                     self.problem += (
                         v['SOC'][(i, t + 1)] == v['SOC'][(i, t)]
@@ -815,7 +871,27 @@ class MultiBESSMILPOptimizer:
                 agg_R = pulp.lpSum([v[f'R_{s_key}'][(i, t)] for i in range(N)])
                 agg_A = pulp.lpSum([v[f'A_{s_key}'][(i, t)] for i in range(N)])
                 obj += s.capacity_price * aw * agg_R
-                obj += (s.energy_price * s.activation_probability * aw) * agg_A
+                # SIGN OF THE ACTIVATION ENERGY.
+                #
+                # Upward activation: the provider DELIVERS energy and Terna
+                # buys it (Prezzo Medio di Acquisto). Revenue, positive.
+                #
+                # Downward activation: the provider ABSORBS energy and Terna
+                # SELLS it (Prezzo Medio di Vendita). The provider PAYS. The
+                # field name is literally "di Vendita" from Terna's side, and
+                # booking it as revenue means the battery is paid to charge
+                # AND keeps the energy to resell, worth twice the price per
+                # MWh in its favour.
+                #
+                # That error made downward regulation dominate everything: on
+                # identically priced up and down products the model earned
+                # +380 EUR/MWh downward against +120 upward, so it never chose
+                # anything else, and 99.6% of service revenue landed on
+                # aFRR_dn. Reviewer 2 flagged that concentration as a likely
+                # calibration artifact; it was this.
+                _en_sign = -1.0 if s_enum in DIRECTIONAL_SERVICES_DN else 1.0
+                obj += (_en_sign * s.energy_price
+                        * s.activation_probability * aw) * agg_A
 
                 # STEP E: formal expected non-delivery penalty, for symmetry
                 # with the env reward (Steps C/D). The shortfall (R - A) is the
@@ -879,6 +955,12 @@ class MultiBESSMILPOptimizer:
         self.problem = pulp.LpProblem("MultiBESS_BSP", pulp.LpMaximize)
         v = self._create_variables(time_horizon)
         self.variables = v
+
+        # The SoC balance now needs the per-hour award and activation
+        # probabilities, to take the activation energy in expectation exactly
+        # as the objective does. Stashed here rather than threaded through
+        # every constraint builder's signature.
+        self._current_services = flexibility_services
 
         # Constraints
         self._add_battery_constraints(v, time_horizon)
@@ -1118,7 +1200,12 @@ class MultiBESSMILPOptimizer:
                            else s.energy_price)
                 aw = s.award_probability
                 cap_rev = true_cap * aw * agg_res[label][t]
-                en_rev  = true_en * s.activation_probability * aw * agg_act[label][t]
+                # Same sign convention as the objective: downward activation
+                # energy is bought by the provider, not sold. See the note in
+                # the objective assembly.
+                _en_sign = -1.0 if s_enum in DIRECTIONAL_SERVICES_DN else 1.0
+                en_rev  = (_en_sign * true_en * s.activation_probability
+                           * aw * agg_act[label][t])
                 flex_rev_by_service[label] += cap_rev + en_rev
 
         flex_revenue = sum(flex_rev_by_service.values())

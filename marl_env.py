@@ -59,7 +59,7 @@ from pettingzoo.utils.env import ParallelEnv
 
 from milp_optimizer import BatteryParameters
 from marl_milp_continuous import MultiBatteryParameters
-from flexibility_market import FlexibilityService, ServiceType
+from flexibility_market import DIRECTIONAL_SERVICES_DN, FlexibilityService, ServiceType
 from degradation_model import LFPBatteryState, LFPDegradationParameters
 from market_constants import SustainDurations, DEFAULT_SUSTAIN
 from fleet_coupling import FleetCoupling, project_to_connection
@@ -854,7 +854,17 @@ class MultiBESSEnv(ParallelEnv):
                 else:
                     act_w = 1.0 if (self._rng.random() < s.activation_probability) else 0.0
                 total_cap_payment = s.capacity_price * agg_bids[st] * aw_w
-                total_energy_payment = s.energy_price * agg_bids[st] * aw_w * act_w
+                # Downward activation energy is BOUGHT by the provider, not
+                # sold: Terna's field is "Prezzo Medio di Vendita", the price
+                # at which the TSO SELLS energy to the BSP. Booking it as
+                # revenue paid the battery to charge and let it keep the
+                # energy to resell, and made downward regulation dominate
+                # every run. Must match marl_milp_continuous exactly, or the
+                # optimizer and the environment price the same product
+                # differently.
+                _en_sign = -1.0 if st in DIRECTIONAL_SERVICES_DN else 1.0
+                total_energy_payment = (_en_sign * s.energy_price
+                                        * agg_bids[st] * aw_w * act_w)
                 direction = service_directions[st]
                 per_service_revenue[st] = total_cap_payment + total_energy_payment
 
@@ -1039,7 +1049,9 @@ class MultiBESSEnv(ParallelEnv):
                     # energy payment weighted by award AND activation
                     # expectation (w = 1.0 in eval).
                     w = aw_w * act_w
-                    pay = energy_price * delivered * w
+                    # Same sign convention as above and as the MILP.
+                    _en_sign = -1.0 if st in DIRECTIONAL_SERVICES_DN else 1.0
+                    pay = _en_sign * energy_price * delivered * w
                     per_agent_flex[a] += pay
                     per_service_revenue[st] = per_service_revenue.get(st, 0.0) + pay
                     eff_delivered = delivered * w
