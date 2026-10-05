@@ -1,0 +1,19 @@
+﻿**********************
+Inizio trascrizione Windows PowerShell
+Ora di inizio: 20261002144543
+Nome utente: DESKTOP-9EAIUMF\lorenzo.giannuzzo
+Esegui come utente: DESKTOP-9EAIUMF\lorenzo.giannuzzo
+Nome configurazione: 
+Computer DESKTOP-9EAIUMF (Microsoft Windows NT 10.0.26200.0)
+Applicazione host: powershell.exe -NoExit -ExecutionPolicy Bypass -File C:\Program Files\JetBrains\PyCharm Community Edition 2023.3.3\plugins\terminal\shell-integrations\powershell\powershell-integration.ps1
+ID processo: 22108
+PSVersion: 5.1.26100.9549
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.9549
+BuildVersion: 10.0.26100.9549
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Trascrizione avviata. File di output: ablation_tesi_reale_log.txt
