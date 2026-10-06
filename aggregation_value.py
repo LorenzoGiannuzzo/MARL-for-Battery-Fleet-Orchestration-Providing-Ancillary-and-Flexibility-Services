@@ -47,6 +47,8 @@ behavioural clone, no RLlib.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import sys
@@ -197,11 +199,6 @@ def _solve_window(fleet, window, n_days: int, sustain: SustainDurations,
     that do not exist. Both arms carry it, so neither is advantaged.
     """
     N = fleet.n_batteries
-    opt = MultiBESSMILPOptimizer(
-        fleet, None, use_nonlinear_degradation=False,
-        directional_services=True, coupling=FleetCoupling.uncoupled(),
-        **sustain.as_milp_kwargs())
-
     soc = [b.initial_soc for b in fleet.batteries]
     totals = dict(net=0.0, arb=0.0, flex=0.0, deg=0.0)
     by_service: Dict[str, float] = {}
@@ -233,11 +230,22 @@ def _solve_window(fleet, window, n_days: int, sustain: SustainDurations,
 
     for day in range(n_days):
         prices, services = window.slice_day(day)
+        #Lorenzo Giannuzzo: a fresh optimizer every day; a reused one returns, from the second call
+        # onwards, a solution of the first day's constraints (initial SOC and SOC dynamics)
+        with contextlib.redirect_stdout(io.StringIO()):
+            opt = MultiBESSMILPOptimizer(
+                fleet, None, use_nonlinear_degradation=False,
+                directional_services=True, coupling=FleetCoupling.uncoupled(),
+                **sustain.as_milp_kwargs())
         opt.current_soc = list(soc)
         res = opt.optimize(24, list(prices), list(services))
 
         if res.solver_status == "Optimal":
             n_optimal += 1
+            #Lorenzo Giannuzzo: guard, every daily solution must start from the SOC carried in
+            start = [opt.variables["SOC"][(i, 0)].varValue for i in range(N)]
+            if max(abs(a - b) for a, b in zip(start, soc)) > 1e-6:
+                raise RuntimeError(f"[{tag}] day {day}: solution does not start from the carried SOC")
         totals["net"] += float(res.net_profit)
         totals["arb"] += float(res.arbitrage_profit)
         totals["flex"] += float(res.flexibility_revenue)
